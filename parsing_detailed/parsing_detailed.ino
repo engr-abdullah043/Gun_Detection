@@ -56,13 +56,20 @@ static const uint32_t MAX_PACKET_LEN = 32 * 1024;
 // Range-bin spacing = c * Fs / (2 * slope * rangeFFTSize)
 // using Fs=2.279 MHz and slope=70 MHz/us.
 const size_t RANGE_PROFILE_MAX_BINS = 128;
-const float RANGE_BIN_SIZE_METERS = 0.03815f;
-const float RANGE_PROFILE_LOG2_TO_DB = 6.020599913f / 256.0f;
-const float RANGE_PROFILE_DOPPLER_GAIN_DB = 30.10299957f;
+const float RANGE_BIN_SIZE_METERS = 0.0381529018f;
+
+// Match mmWave Demo Visualizer 3.6.0 for this profile exactly:
+//   dB = raw * (16 / 12) / 256 * (20 * log10(2))
+//        + 20 * log10(32 / 128) + 20 * log10(16 / 32)
+// 12 is the number of virtual antennas; 16 is its next power of two.
+// The final two terms compensate the 128-bin range FFT and 32-bin Doppler FFT.
+// This is relative power, not calibrated dBm.
+const float RANGE_PROFILE_RAW_TO_DB = 0.031357291215f;
+const float RANGE_PROFILE_FFT_COMPENSATION_DB = -18.061799740f;
 
 // Clustering parameters
 const float DBSCAN_EPS = 0.15;
-const int DBSCAN_MIN_POINTS = 12;
+const int DBSCAN_MIN_POINTS = 6;
 
 // Range filtering
 const float RANGE_MIN = 0.20;
@@ -76,12 +83,12 @@ const int MIN_SNR = 20;
 const uint16_t SNR_UNKNOWN = 0;
 
 // Minimum cluster size
-const int MIN_CLUSTER_POINTS = 10;
-const int MIN_POINTS_FOR_OUTPUT = 10;
+const int MIN_CLUSTER_POINTS = 6;
+const int MIN_POINTS_FOR_OUTPUT = 6;
 
 // ===== NEW: GHOST REJECTION SETTINGS =====
-const int MIN_POINTS_FOR_VALID_OBJECT = 12;
-const int MIN_POINTS_FOR_CONFIRMED_MATCH = 15;
+const int MIN_POINTS_FOR_VALID_OBJECT = 8;
+const int MIN_POINTS_FOR_CONFIRMED_MATCH = 10;
 
 // Spatial coherence requirements
 const float MAX_CLUSTER_SPREAD = 0.6;        // Max 60cm spread
@@ -105,7 +112,7 @@ const int MIN_STABLE_FRAMES = 10;
 const char* CALIBRATION_FILE = "/radar_calibration.json";
 
 // Shape matching
-const float SHAPE_DESCRIPTOR_TOLERANCE = 0.25;
+const float SHAPE_DESCRIPTOR_TOLERANCE = 0.;
 const float GEOMETRY_WEIGHT = 0.7;
 const float FLATNESS_WEIGHT = 2.0;
 
@@ -1277,8 +1284,8 @@ bool findRangeProfilePeakNear(const ParserDiagnostics& diagnostics,
   }
 
   peakRangeMeters = peakBin * RANGE_BIN_SIZE_METERS;
-  relativePowerDb = rawValue * RANGE_PROFILE_LOG2_TO_DB
-                  - RANGE_PROFILE_DOPPLER_GAIN_DB;
+  relativePowerDb = rawValue * RANGE_PROFILE_RAW_TO_DB
+                  + RANGE_PROFILE_FFT_COMPENSATION_DB;
   return true;
 }
 
