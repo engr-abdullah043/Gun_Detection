@@ -16,6 +16,7 @@
 #include <ArduinoJson.h>
 #include <SPIFFS.h>
 #include <vector>
+#include <deque>
 #include <cmath>
 #include <algorithm>
 #include <cstring>
@@ -61,6 +62,10 @@ const float RANGE_MAX = 3.0;
 
 // SNR threshold
 const int MIN_SNR = 20;
+
+// TLV 7 overwrites this value. Frames without side information must not
+// silently pass SNR filtering with fabricated measurements.
+const uint16_t SNR_UNKNOWN = 0;
 
 // Minimum cluster size
 const int MIN_CLUSTER_POINTS = 10;
@@ -261,22 +266,26 @@ public:
     distance = dist;
     numPoints = (int)pts.size();
 
-    float sumSnr = 0, sumSnr2 = 0;
+    // Accumulate statistics in double precision. Individual side-information
+    // samples remain the exact uint16_t values reported by the sensor.
+    double sumSnr = 0.0, sumSnr2 = 0.0;
     maxSnr = 0;
     minSnr = 10000;
     for (uint16_t s : snrs) {
-      sumSnr += s;
-      sumSnr2 += (float)s * (float)s;
+      sumSnr += (double)s;
+      sumSnr2 += (double)s * (double)s;
       if (s > maxSnr) maxSnr = s;
       if (s < minSnr) minSnr = s;
     }
 
-    meanSnr = (numPoints > 0) ? (sumSnr / numPoints) : 0;
-    snrVariance = (numPoints > 0) ? ((sumSnr2 / numPoints) - (meanSnr * meanSnr)) : 0;
+    meanSnr = (numPoints > 0) ? (float)(sumSnr / numPoints) : 0;
+    snrVariance = (numPoints > 0)
+      ? (float)((sumSnr2 / numPoints) - ((double)meanSnr * meanSnr)) : 0;
     snrStd = sqrt(max(0.0f, snrVariance));
     snrVarianceRatio = snrStd / (meanSnr + 1e-6);
 
-    rcsEstimate = sumSnr / (distance * distance * sqrt(max(1, numPoints)) + 1e-6);
+    rcsEstimate = (float)(sumSnr /
+      (distance * distance * sqrt(max(1, numPoints)) + 1e-6));
     pointDensity = numPoints / (volume + 1e-6);
     reflectionConsistency = snrStd / (meanSnr + 1e-6);
 
@@ -628,8 +637,7 @@ public:
   }
 
   bool findMatch(const AdvancedShapeDescriptor& descriptor,
-                 String& matchedName, float& confidence,
-                 float& geoMatch, float& matMatch) {
+                 String& matchedName, float& confidence) {
     float bestDistance = 999999.0f;
     bool found = false;
 
@@ -667,8 +675,6 @@ public:
 
     if (bestDistance < 999999.0f) {
       confidence = max(0.0f, min(100.0f, (1.0f - bestDistance) * 100.0f));
-      geoMatch = 0.0f;
-      matMatch = 0.0f;
       found = bestDistance < SHAPE_DESCRIPTOR_TOLERANCE;
     }
     return found;
@@ -686,7 +692,7 @@ struct TrackedObject {
   int hits;
   
   // Descriptor history for robust matching
-  std::vector<AdvancedShapeDescriptor> allDescriptors;
+  std::deque<AdvancedShapeDescriptor> allDescriptors;
   
   // Match hysteresis state
   String matchedName;
@@ -709,7 +715,7 @@ struct TrackedObject {
   // NEW: Quality tracking
   int consecutiveValidDetections;
   int consecutiveHighQuality;
-  std::vector<float> qualityHistory;
+  std::deque<float> qualityHistory;
   bool isGhost;
   bool measuredThisFrame;
   
@@ -810,13 +816,13 @@ public:
     track.allDescriptors.push_back(descriptor);
     
     if (track.allDescriptors.size() > DESCRIPTOR_WINDOW_SIZE) {
-      track.allDescriptors.erase(track.allDescriptors.begin());
+      track.allDescriptors.pop_front();
     }
     
     // Track quality
     track.qualityHistory.push_back(descriptor.confidenceScore);
     if (track.qualityHistory.size() > 30) {
-      track.qualityHistory.erase(track.qualityHistory.begin());
+      track.qualityHistory.pop_front();
     }
     
     if (descriptor.isValid && descriptor.confidenceScore > 70) {
@@ -920,8 +926,8 @@ public:
     
     // Find match
     String matchName;
-    float confidence = 0.0f, geoMatch = 0.0f, matMatch = 0.0f;
-    bool matched = calibDB->findMatch(robustDesc, matchName, confidence, geoMatch, matMatch);
+    float confidence = 0.0f;
+    bool matched = calibDB->findMatch(robustDesc, matchName, confidence);
     track.candidateName = matchName;
     track.candidateDistance = 1.0f - (confidence / 100.0f);
     
@@ -1079,8 +1085,8 @@ public:
   bool readPacket(std::vector<RadarPoint>& points) {
     points.clear();
     diagnostics = ParserDiagnostics();
-    bool tlvLengthConventionKnown = false;
-    bool tlvLengthIncludesHeader = false;
+    bool preferredLengthConventionKnown = false;
+    bool preferredLengthIncludesHeader = false;
 
     if (!syncToMagic(3000)) return false;
 
@@ -1110,6 +1116,14 @@ public:
 
     size_t tlvStart = HEADER_LEN;
 
+    auto plausibleTlvHeader = [&](size_t pos) -> bool {
+      if (pos + 8U > totalLen) return false;
+      uint32_t candidateType = u32le(pkt + pos);
+      uint32_t candidateLen = u32le(pkt + pos + 4U);
+      return candidateType >= 1U && candidateType <= 20U &&
+             candidateLen > 0U && candidateLen <= (totalLen - pos);
+    };
+
     for (uint32_t t = 0; t < numTLVs; t++) {
       if (tlvStart + 8 > totalLen) {
         diagnostics.malformed = true;
@@ -1123,37 +1137,43 @@ public:
         diagnostics.tlvTypes[diagnostics.tlvTypeCount++] = tlvType;
       }
 
-      // Determine the wire convention from TLV 1. Different xWR68xx demo
-      // builds use either payload-only length or header+payload length.
-      if (!tlvLengthConventionKnown && tlvType == 1) {
+      // Some xWR68xx demo builds disagree on whether tlvLen includes the
+      // 8-byte TLV header. Resolve each boundary by checking which candidate
+      // lands on a plausible next TLV header. This also tolerates TLV 1 not
+      // being first and mixed conventions in vendor demo output.
+      size_t includeEnd = (tlvLen >= 8U && tlvLen <= totalLen - tlvStart)
+        ? tlvStart + tlvLen : totalLen + 1U;
+      size_t payloadEnd = (tlvLen <= totalLen - tlvData)
+        ? tlvData + tlvLen : totalLen + 1U;
+      bool includeValid = includeEnd <= totalLen;
+      bool payloadValid = payloadEnd <= totalLen;
+
+      if (t + 1U < numTLVs) {
+        includeValid = includeValid && plausibleTlvHeader(includeEnd);
+        payloadValid = payloadValid && plausibleTlvHeader(payloadEnd);
+      }
+
+      bool lengthIncludesHeader = false;
+      if (includeValid && !payloadValid) {
+        lengthIncludesHeader = true;
+      } else if (!includeValid && payloadValid) {
+        lengthIncludesHeader = false;
+      } else if (includeValid && payloadValid && preferredLengthConventionKnown) {
+        lengthIncludesHeader = preferredLengthIncludesHeader;
+      } else if (includeValid && payloadValid && tlvType == 1U) {
         const size_t expectedPointBytes = (size_t)numObj * 16U;
-        if (tlvLen >= expectedPointBytes + 8U) {
-          tlvLengthIncludesHeader = true;
-          tlvLengthConventionKnown = true;
-        } else if (tlvLen >= expectedPointBytes) {
-          tlvLengthIncludesHeader = false;
-          tlvLengthConventionKnown = true;
-        }
-      }
-
-      if (!tlvLengthConventionKnown) {
+        lengthIncludesHeader = tlvLen >= expectedPointBytes + 8U;
+      } else if (includeValid && payloadValid) {
+        lengthIncludesHeader = false;
+      } else {
         diagnostics.malformed = true;
         break;
       }
 
-      if ((tlvLengthIncludesHeader && tlvLen < 8U) ||
-          tlvLen > (totalLen - tlvStart)) {
-        diagnostics.malformed = true;
-        break;
-      }
-      size_t payloadLen = tlvLengthIncludesHeader ? tlvLen - 8U : tlvLen;
-      size_t tlvEnd = tlvLengthIncludesHeader ? tlvStart + tlvLen
-                                              : tlvData + tlvLen;
-
-      if (tlvEnd > totalLen) {
-        diagnostics.malformed = true;
-        break;
-      }
+      preferredLengthConventionKnown = true;
+      preferredLengthIncludesHeader = lengthIncludesHeader;
+      size_t tlvEnd = lengthIncludesHeader ? includeEnd : payloadEnd;
+      size_t payloadLen = tlvEnd - tlvData;
 
       if (tlvType == 1 && payloadLen >= numObj * 16) {
         diagnostics.pointsTlvSeen = true;
@@ -1164,7 +1184,7 @@ public:
           memcpy(&pt.y, pkt + off + 4, 4);
           memcpy(&pt.z, pkt + off + 8, 4);
           memcpy(&pt.velocity, pkt + off + 12, 4);
-          pt.snr = 100;
+          pt.snr = SNR_UNKNOWN;
           pt.noise = 0;
 
           if (isfinite(pt.x) && isfinite(pt.y) && isfinite(pt.z) &&
@@ -1214,11 +1234,13 @@ void clusterDBSCAN(const std::vector<RadarPoint>& points,
 
   if (points.size() < (size_t)DBSCAN_MIN_POINTS) return;
 
-  std::vector<int> labels(points.size(), -1);
+  const int UNVISITED = -2;
+  const int NOISE = -1;
+  std::vector<int> labels(points.size(), UNVISITED);
   int clusterID = 0;
 
   for (size_t i = 0; i < points.size(); i++) {
-    if (labels[i] >= 0) continue;
+    if (labels[i] != UNVISITED) continue;
 
     std::vector<size_t> neighbors;
     neighbors.reserve(50);
@@ -1231,29 +1253,47 @@ void clusterDBSCAN(const std::vector<RadarPoint>& points,
     }
 
     if ((int)neighbors.size() < DBSCAN_MIN_POINTS) {
-      labels[i] = -1;
+      labels[i] = NOISE;
       continue;
     }
 
     labels[i] = clusterID;
+    std::vector<bool> queued(points.size(), false);
+    queued[i] = true;
+    for (size_t neighborIdx : neighbors) queued[neighborIdx] = true;
 
     for (size_t k = 0; k < neighbors.size(); k++) {
       size_t nIdx = neighbors[k];
-      if (labels[nIdx] == -1) labels[nIdx] = clusterID;
-      if (labels[nIdx] >= 0) continue;
+
+      // A point previously classified as noise may be a border point of this
+      // cluster, but border points do not expand the search.
+      if (labels[nIdx] == NOISE) {
+        labels[nIdx] = clusterID;
+        continue;
+      }
+
+      // Already processed or assigned to a cluster.
+      if (labels[nIdx] != UNVISITED) continue;
 
       labels[nIdx] = clusterID;
 
       Point3D pn(points[nIdx].x, points[nIdx].y, points[nIdx].z);
+      std::vector<size_t> subNeighbors;
+      subNeighbors.reserve(32);
       for (size_t j = 0; j < points.size(); j++) {
         if (nIdx == j) continue;
         Point3D pj(points[j].x, points[j].y, points[j].z);
         if (pn.distanceTo(pj) < DBSCAN_EPS) {
-          bool found = false;
-          for (size_t m = 0; m < neighbors.size(); m++) {
-            if (neighbors[m] == j) { found = true; break; }
+          subNeighbors.push_back(j);
+        }
+      }
+
+      if ((int)subNeighbors.size() >= DBSCAN_MIN_POINTS) {
+        for (size_t subIdx : subNeighbors) {
+          if (!queued[subIdx]) {
+            neighbors.push_back(subIdx);
+            queued[subIdx] = true;
           }
-          if (!found) neighbors.push_back(j);
         }
       }
     }
@@ -1338,22 +1378,22 @@ bool extractDimensions(const ClusterData& cluster, AdvancedShapeDescriptor& desc
 
   descriptor.compute(length, width, height, filtered, filteredSnrs, centroid.norm());
 
-  float velocitySum = 0.0f;
+  double velocitySum = 0.0;
   float maxAbsVelocity = 0.0f;
-  float noiseSum = 0.0f;
-  float marginSum = 0.0f;
+  double noiseSum = 0.0;
+  double marginSum = 0.0;
   size_t metricCount = min(cluster.velocities.size(), cluster.noises.size());
   for (size_t i = 0; i < metricCount; i++) {
-    velocitySum += cluster.velocities[i];
+    velocitySum += (double)cluster.velocities[i];
     maxAbsVelocity = max(maxAbsVelocity, fabs(cluster.velocities[i]));
-    noiseSum += cluster.noises[i];
-    marginSum += (float)cluster.snrs[i] - (float)cluster.noises[i];
+    noiseSum += (double)cluster.noises[i];
+    marginSum += (double)cluster.snrs[i] - (double)cluster.noises[i];
   }
   if (metricCount > 0) {
-    descriptor.meanRadialVelocity = velocitySum / metricCount;
+    descriptor.meanRadialVelocity = (float)(velocitySum / metricCount);
     descriptor.maxAbsRadialVelocity = maxAbsVelocity;
-    descriptor.meanNoise = noiseSum / metricCount;
-    descriptor.meanSnrMargin = marginSum / metricCount;
+    descriptor.meanNoise = (float)(noiseSum / metricCount);
+    descriptor.meanSnrMargin = (float)(marginSum / metricCount);
   }
   return true;
 }
@@ -1650,18 +1690,18 @@ void loop() {
       Serial.println("     ❓ UNKNOWN OBJECT");
     }
 
-    Serial.printf("     Position: X=%+.3fm Y=%+.3fm Z=%+.3fm | Range=%.3fm\n",
+    Serial.printf("     Position estimate: X=%+.4fm Y=%+.4fm Z=%+.4fm | Range=%.4fm\n",
                   pos.x, pos.y, pos.z, pos.norm());
-    Serial.printf("     Radial velocity: mean=%+.3fm/s peak=%.3fm/s | Track velocity=(%+.3f,%+.3f,%+.3f)m/s\n",
+    Serial.printf("     Radial velocity estimate: mean=%+.4fm/s peak=%.4fm/s | Track velocity=(%+.4f,%+.4f,%+.4f)m/s\n",
                   desc.meanRadialVelocity, desc.maxAbsRadialVelocity,
                   track.velocity.x, track.velocity.y, track.velocity.z);
-    Serial.printf("     Sensor side info (raw): SNR mean=%.1f min=%.0f peak=%.0f | Noise mean=%.1f | SNR-noise margin=%.1f\n",
+    Serial.printf("     Sensor side info (raw): SNR mean=%.3f min=%.0f peak=%.0f | Noise mean=%.3f\n",
                   desc.meanSnr, desc.minSnr, desc.maxSnr,
-                  desc.meanNoise, desc.meanSnrMargin);
-    Serial.printf("     Geometry: L=%.1fcm W=%.1fcm H=%.1fcm | points=%d density=%.1f/m3\n",
+                  desc.meanNoise);
+    Serial.printf("     Geometry estimate: L=%.2fcm W=%.2fcm H=%.2fcm | points=%d density=%.2f/m3\n",
                   desc.length * 100.0f, desc.width * 100.0f,
                   desc.height * 100.0f, desc.numPoints, desc.pointDensity);
-    Serial.printf("     Shape: planarity=%.3f flatness=%.3f thickness=%.1fcm spread=%.1fcm\n",
+    Serial.printf("     Shape: planarity=%.4f flatness=%.4f thickness=%.2fcm spread=%.2fcm\n",
                   desc.planarityScore, desc.flatnessRatio,
                   desc.pointCloudThickness * 100.0f, desc.spatialSpread * 100.0f);
     Serial.printf("     Quality: %.0f%% | valid=%s | reason=%s | score=%.4f\n",
