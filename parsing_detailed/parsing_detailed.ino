@@ -69,7 +69,7 @@ const float RANGE_PROFILE_FFT_COMPENSATION_DB = -18.061799740f;
 
 // Clustering parameters
 const float DBSCAN_EPS = 0.15;
-const int DBSCAN_MIN_POINTS = 12;
+const int DBSCAN_MIN_POINTS = 6;
 
 // Range filtering
 const float RANGE_MIN = 0.20;
@@ -83,11 +83,11 @@ const int MIN_SNR = 20;
 const uint16_t SNR_UNKNOWN = 0;
 
 // Minimum cluster size
-const int MIN_CLUSTER_POINTS = 10;
-const int MIN_POINTS_FOR_OUTPUT = 10;
+const int MIN_CLUSTER_POINTS = 6;
+const int MIN_POINTS_FOR_OUTPUT = 6;
 
 // ===== NEW: GHOST REJECTION SETTINGS =====
-const int MIN_POINTS_FOR_VALID_OBJECT = 12;
+const int MIN_POINTS_FOR_VALID_OBJECT = 6;
 const int MIN_POINTS_FOR_CONFIRMED_MATCH = 15;
 
 // Spatial coherence requirements
