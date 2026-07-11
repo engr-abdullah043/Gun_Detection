@@ -52,6 +52,14 @@ const long RADAR_BAUD = 921600;
 static const uint32_t HEADER_LEN = 40;
 static const uint32_t MAX_PACKET_LEN = 32 * 1024;
 
+// Active balanced profile: 128-point range FFT and 32 Doppler bins.
+// Range-bin spacing = c * Fs / (2 * slope * rangeFFTSize)
+// using Fs=2.279 MHz and slope=70 MHz/us.
+const size_t RANGE_PROFILE_MAX_BINS = 128;
+const float RANGE_BIN_SIZE_METERS = 0.03815f;
+const float RANGE_PROFILE_LOG2_TO_DB = 6.020599913f / 256.0f;
+const float RANGE_PROFILE_DOPPLER_GAIN_DB = 30.10299957f;
+
 // Clustering parameters
 const float DBSCAN_EPS = 0.15;
 const int DBSCAN_MIN_POINTS = 12;
@@ -1014,12 +1022,18 @@ struct ParserDiagnostics {
   uint8_t tlvTypeCount;
   bool pointsTlvSeen;
   bool sideInfoTlvSeen;
+  bool rangeProfileSeen;
   bool malformed;
+  uint16_t rangeProfile[RANGE_PROFILE_MAX_BINS];
+  size_t rangeProfileBinCount;
 
   ParserDiagnostics()
     : frameNumber(0), uartObjectCount(0), parsedPointCount(0), numTLVs(0),
       packetLength(0), tlvTypeCount(0), pointsTlvSeen(false),
-      sideInfoTlvSeen(false), malformed(false) {}
+      sideInfoTlvSeen(false), rangeProfileSeen(false), malformed(false),
+      rangeProfileBinCount(0) {
+    memset(rangeProfile, 0, sizeof(rangeProfile));
+  }
 };
 
 class RadarParser {
@@ -1145,8 +1159,10 @@ public:
         ? tlvStart + tlvLen : totalLen + 1U;
       size_t payloadEnd = (tlvLen <= totalLen - tlvData)
         ? tlvData + tlvLen : totalLen + 1U;
-      bool includeValid = includeEnd <= totalLen;
-      bool payloadValid = payloadEnd <= totalLen;
+      bool includeInBounds = includeEnd <= totalLen;
+      bool payloadInBounds = payloadEnd <= totalLen;
+      bool includeValid = includeInBounds;
+      bool payloadValid = payloadInBounds;
 
       if (t + 1U < numTLVs) {
         includeValid = includeValid && plausibleTlvHeader(includeEnd);
@@ -1165,6 +1181,13 @@ public:
         lengthIncludesHeader = tlvLen >= expectedPointBytes + 8U;
       } else if (includeValid && payloadValid) {
         lengthIncludesHeader = false;
+      } else if (tlvType == 2U && preferredLengthConventionKnown &&
+                 ((preferredLengthIncludesHeader && includeInBounds) ||
+                  (!preferredLengthIncludesHeader && payloadInBounds))) {
+        // Range-profile TLV may be followed by vendor-specific data whose
+        // header is not in the standard type range. Reuse the convention
+        // already proven by TLVs 1 and 7 so TLV 2 remains available.
+        lengthIncludesHeader = preferredLengthIncludesHeader;
       } else {
         // A vendor-specific or trailing visualization TLV may use a layout we
         // do not understand. The detection frame is still complete when both
@@ -1210,6 +1233,18 @@ public:
           off += 4;
         }
       }
+      else if (tlvType == 2 && payloadLen >= 2U) {
+        // Zero-Doppler range profile: one uint16 log-magnitude value per
+        // range bin. Retain the raw values and convert only when displaying.
+        size_t availableBins = payloadLen / 2U;
+        diagnostics.rangeProfileBinCount =
+          availableBins < RANGE_PROFILE_MAX_BINS
+            ? availableBins : RANGE_PROFILE_MAX_BINS;
+        for (size_t i = 0; i < diagnostics.rangeProfileBinCount; i++) {
+          diagnostics.rangeProfile[i] = u16le(pkt + tlvData + i * 2U);
+        }
+        diagnostics.rangeProfileSeen = diagnostics.rangeProfileBinCount > 0;
+      }
 
       tlvStart = tlvEnd;
     }
@@ -1219,19 +1254,77 @@ public:
   }
 };
 
+bool findRangeProfilePeakNear(const ParserDiagnostics& diagnostics,
+                              float targetRangeMeters,
+                              float& peakRangeMeters,
+                              float& relativePowerDb,
+                              uint16_t& rawValue) {
+  if (!diagnostics.rangeProfileSeen || diagnostics.rangeProfileBinCount == 0)
+    return false;
+
+  int centerBin = (int)lroundf(targetRangeMeters / RANGE_BIN_SIZE_METERS);
+  int firstBin = max(0, centerBin - 2);
+  int lastBin = min((int)diagnostics.rangeProfileBinCount - 1, centerBin + 2);
+  if (firstBin > lastBin) return false;
+
+  int peakBin = firstBin;
+  rawValue = diagnostics.rangeProfile[firstBin];
+  for (int bin = firstBin + 1; bin <= lastBin; bin++) {
+    if (diagnostics.rangeProfile[bin] > rawValue) {
+      rawValue = diagnostics.rangeProfile[bin];
+      peakBin = bin;
+    }
+  }
+
+  peakRangeMeters = peakBin * RANGE_BIN_SIZE_METERS;
+  relativePowerDb = rawValue * RANGE_PROFILE_LOG2_TO_DB
+                  - RANGE_PROFILE_DOPPLER_GAIN_DB;
+  return true;
+}
+
 // =========================================================
 // Point Processing
 // =========================================================
-void filterPoints(std::vector<RadarPoint>& points) {
+struct FilterDiagnostics {
+  size_t inputCount;
+  size_t acceptedCount;
+  size_t rangeRejected;
+  size_t snrUnknown;
+  size_t snrBelowThreshold;
+
+  FilterDiagnostics()
+    : inputCount(0), acceptedCount(0), rangeRejected(0), snrUnknown(0),
+      snrBelowThreshold(0) {}
+};
+
+// Explicit prototype prevents the Arduino sketch preprocessor from emitting
+// this declaration before the custom return type above is defined.
+FilterDiagnostics filterPoints(std::vector<RadarPoint>& points);
+
+FilterDiagnostics filterPoints(std::vector<RadarPoint>& points) {
+  FilterDiagnostics diagnostics;
+  diagnostics.inputCount = points.size();
   std::vector<RadarPoint> filtered;
   filtered.reserve(points.size());
   for (const auto& pt : points) {
     float range = sqrt(pt.x*pt.x + pt.y*pt.y + pt.z*pt.z);
-    if (range >= RANGE_MIN && range <= RANGE_MAX && pt.snr >= MIN_SNR) {
-      filtered.push_back(pt);
+    if (range < RANGE_MIN || range > RANGE_MAX) {
+      diagnostics.rangeRejected++;
+      continue;
     }
+    if (pt.snr == SNR_UNKNOWN) {
+      diagnostics.snrUnknown++;
+      continue;
+    }
+    if (pt.snr < MIN_SNR) {
+      diagnostics.snrBelowThreshold++;
+      continue;
+    }
+    filtered.push_back(pt);
   }
   points = filtered;
+  diagnostics.acceptedCount = points.size();
+  return diagnostics;
 }
 
 void clusterDBSCAN(const std::vector<RadarPoint>& points,
@@ -1445,6 +1538,10 @@ void setup() {
   pinMode(BUTTON_PIN, INPUT_PULLUP);
   Serial.printf("✓ Button initialized on GPIO%d\n", BUTTON_PIN);
 
+  // Radar packets arrive as short 921600-baud bursts. The Arduino default RX
+  // ring is smaller than a typical point-cloud packet, so allocate enough
+  // space for one maximum-size packet before enabling the UART.
+  RadarSerial.setRxBufferSize(MAX_PACKET_LEN);
   RadarSerial.begin(RADAR_BAUD, SERIAL_8N1, RADAR_RX_PIN, RADAR_TX_PIN);
   Serial.printf("✓ Radar UART: RX=GPIO%d @ %ld baud (TX unused)\n", RADAR_RX_PIN, RADAR_BAUD);
 
@@ -1536,11 +1633,22 @@ void loop() {
     return;
   }
 
-  filterPoints(points);
+  const FilterDiagnostics filterInfo = filterPoints(points);
   const size_t filteredPointCount = points.size();
   if (points.empty()) {
-    Serial.printf("Radar frame %lu: %u raw points, all rejected by range/SNR filters\n",
-                  (unsigned long)parserInfo.frameNumber, (unsigned)rawPointCount);
+    Serial.printf("Radar frame %lu: %u raw, 0 accepted | range=%u unknownSNR=%u lowSNR=%u | sideInfo=%s malformed=%s TLVs=[",
+                  (unsigned long)parserInfo.frameNumber,
+                  (unsigned)filterInfo.inputCount,
+                  (unsigned)filterInfo.rangeRejected,
+                  (unsigned)filterInfo.snrUnknown,
+                  (unsigned)filterInfo.snrBelowThreshold,
+                  parserInfo.sideInfoTlvSeen ? "yes" : "no",
+                  parserInfo.malformed ? "yes" : "no");
+    for (uint8_t i = 0; i < parserInfo.tlvTypeCount; i++) {
+      if (i) Serial.print(',');
+      Serial.print(parserInfo.tlvTypes[i]);
+    }
+    Serial.println("]");
     delay(10);
     return;
   }
@@ -1697,6 +1805,17 @@ void loop() {
 
     Serial.printf("     Position estimate: X=%+.4fm Y=%+.4fm Z=%+.4fm | Range=%.4fm\n",
                   pos.x, pos.y, pos.z, pos.norm());
+    float profilePeakRange = 0.0f;
+    float profileRelativePowerDb = 0.0f;
+    uint16_t profileRawValue = 0;
+    if (findRangeProfilePeakNear(parserInfo, pos.norm(), profilePeakRange,
+                                 profileRelativePowerDb, profileRawValue)) {
+      Serial.printf("     Range-profile relative power: %.2f dB at %.4fm | raw=%u (relative, not dBm)\n",
+                    profileRelativePowerDb, profilePeakRange,
+                    (unsigned)profileRawValue);
+    } else {
+      Serial.println("     Range-profile relative power: unavailable (TLV 2 missing)");
+    }
     Serial.printf("     Radial velocity estimate: mean=%+.4fm/s peak=%.4fm/s | Track velocity=(%+.4f,%+.4f,%+.4f)m/s\n",
                   desc.meanRadialVelocity, desc.maxAbsRadialVelocity,
                   track.velocity.x, track.velocity.y, track.velocity.z);
@@ -1717,5 +1836,7 @@ void loop() {
                   track.candidateDistance, SHAPE_DESCRIPTOR_TOLERANCE);
   }
 
-  delay(50);
+  // readPacket() already waits for the next radar frame. Do not sleep here:
+  // verbose Serial output plus an extra delay can overrun burst UART input.
+  delay(1);
 }
