@@ -56,9 +56,16 @@ static const uint32_t MAX_PACKET_LEN = 32 * 1024;
 // Range-bin spacing = c * Fs / (2 * slope * rangeFFTSize)
 // using Fs=2.279 MHz and slope=70 MHz/us.
 const size_t RANGE_PROFILE_MAX_BINS = 128;
-const float RANGE_BIN_SIZE_METERS = 0.03815f;
-const float RANGE_PROFILE_LOG2_TO_DB = 6.020599913f / 256.0f;
-const float RANGE_PROFILE_DOPPLER_GAIN_DB = 30.10299957f;
+const float RANGE_BIN_SIZE_METERS = 0.0381529018f;
+
+// Match mmWave Demo Visualizer 3.6.0 for this profile exactly:
+//   dB = raw * (16 / 12) / 256 * (20 * log10(2))
+//        + 20 * log10(32 / 128) + 20 * log10(16 / 32)
+// 12 is the number of virtual antennas; 16 is its next power of two.
+// The final two terms compensate the 128-bin range FFT and 32-bin Doppler FFT.
+// This is relative power, not calibrated dBm.
+const float RANGE_PROFILE_RAW_TO_DB = 0.031357291215f;
+const float RANGE_PROFILE_FFT_COMPENSATION_DB = -18.061799740f;
 
 // Clustering parameters
 const float DBSCAN_EPS = 0.15;
@@ -1277,8 +1284,8 @@ bool findRangeProfilePeakNear(const ParserDiagnostics& diagnostics,
   }
 
   peakRangeMeters = peakBin * RANGE_BIN_SIZE_METERS;
-  relativePowerDb = rawValue * RANGE_PROFILE_LOG2_TO_DB
-                  - RANGE_PROFILE_DOPPLER_GAIN_DB;
+  relativePowerDb = rawValue * RANGE_PROFILE_RAW_TO_DB
+                  + RANGE_PROFILE_FFT_COMPENSATION_DB;
   return true;
 }
 
