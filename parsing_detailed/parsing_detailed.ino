@@ -119,6 +119,7 @@ const float FLATNESS_WEIGHT = 2.0;
 // Tracking
 const float MAX_TRACKING_DISTANCE = 0.3;
 const int MAX_TRACK_AGE = 10;
+const size_t MAX_TRACKS = 32;
 
 // Match hysteresis
 const float MATCH_ENTER_THRESHOLD = 0.20;
@@ -744,7 +745,7 @@ private:
 
 public:
   ObjectTracker() : nextId(0) {
-    tracks.reserve(20);
+    tracks.reserve(MAX_TRACKS);
   }
 
   void update(const std::vector<ClusterData>& clusters,
@@ -793,10 +794,29 @@ public:
       }
     }
 
+    // Destroy retired tracks before creating replacements. The previous code
+    // only marked them inactive, so their descriptor deques accumulated until
+    // a vector reallocation failed and std::terminate() aborted the ESP32.
+    tracks.erase(
+      std::remove_if(tracks.begin(), tracks.end(),
+        [](const TrackedObject& track) {
+          return !track.active || track.age > MAX_TRACK_AGE;
+        }),
+      tracks.end());
+
     // Create new tracks for unmatched clusters
+    size_t droppedNewTracks = 0;
     for (size_t i = 0; i < clusters.size(); i++) {
       if (!clusterUsed[i]) {
-        TrackedObject t;
+        if (tracks.size() >= MAX_TRACKS) {
+          droppedNewTracks++;
+          continue;
+        }
+
+        // Capacity is reserved up front and bounded above, so this cannot
+        // trigger the vector-wide deep copy seen in the decoded backtrace.
+        tracks.emplace_back();
+        TrackedObject& t = tracks.back();
         t.id = nextId++;
         t.position = clusters[i].centroid;
         t.velocity = Point3D(0,0,0);
@@ -817,13 +837,13 @@ public:
         t.isGhost = !descriptors[i].isValid;
         t.measuredThisFrame = true;
         t.active = true;
-        tracks.push_back(t);
       }
     }
 
-    // Remove old tracks
-    for (auto& track : tracks) {
-      if (track.age > MAX_TRACK_AGE) track.active = false;
+    if (droppedNewTracks > 0) {
+      Serial.printf("Tracker capacity reached (%u); dropped %u transient cluster(s) | freeHeap=%u\n",
+                    (unsigned)MAX_TRACKS, (unsigned)droppedNewTracks,
+                    (unsigned)ESP.getFreeHeap());
     }
   }
 
