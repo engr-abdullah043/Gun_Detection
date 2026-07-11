@@ -1166,7 +1166,12 @@ public:
       } else if (includeValid && payloadValid) {
         lengthIncludesHeader = false;
       } else {
-        diagnostics.malformed = true;
+        // A vendor-specific or trailing visualization TLV may use a layout we
+        // do not understand. The detection frame is still complete when both
+        // required data TLVs have already been parsed successfully.
+        if (!diagnostics.pointsTlvSeen || !diagnostics.sideInfoTlvSeen) {
+          diagnostics.malformed = true;
+        }
         break;
       }
 
