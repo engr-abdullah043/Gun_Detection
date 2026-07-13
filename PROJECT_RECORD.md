@@ -21,12 +21,12 @@ Historical ledger entries are append-only. If an earlier entry is incomplete or 
 
 - Baseline date: 2026-07-13
 - Branch: `main`
-- Baseline commit: `fef5494` (`prepared .md files`)
+- Baseline commit: `2bb9bd0` (`updated_requirement`)
 - Remote state at reconstruction time: `main...origin/main`
 - Working tree before this documentation change: clean
 - Canonical detection firmware: `parsing_detailed/parsing_detailed.ino`
 - Firmware build or hardware test performed during reconstruction: no; the reconstruction was read-only
-- Latest baseline commit purpose: commit the permanent project record, repository instructions, reconstruction plan, and current runtime capture after the tracker-storage crash fix
+- Latest baseline commit purpose: commit the 3.50 m requirement, updated balanced radar profile, long-range rejection capture, and corresponding project-record evidence
 
 There is no build manifest or README that formally declares the canonical sketch. `parsing_detailed/parsing_detailed.ino` is treated as canonical because it contains the latest firmware evolution and its print statements match the committed `output.md` telemetry and the user-provided live sample.
 
@@ -52,6 +52,9 @@ There is no build manifest or README that formally declares the canonical sketch
 | `detection_fix_plan.md` | Later tuning/repair proposal. Several recommendations were superseded or remain unimplemented. |
 | `docs/superpowers/specs/2026-07-11-relaxed-point-thresholds-design.md` | Approved design that retained `DBSCAN_EPS=0.15 m` and aligned four point-count gates at six. |
 | `docs/superpowers/plans/2026-07-11-relaxed-point-thresholds.md` | Implementation plan for the six-point threshold change. |
+| `docs/superpowers/specs/2026-07-13-long-range-clustering-design.md` | Approved 3.50 m clustering design: processing margin, five-total-point semantics, adaptive epsilon bands, and diagnostic requirements. |
+| `docs/superpowers/plans/2026-07-13-long-range-clustering.md` | Implementation and verification checklist for the approved long-range clustering stage. |
+| `tests/test_long_range_clustering_policy.py` | Source-contract regression tests for the range margin, five-point gates, seed-inclusive DBSCAN, adaptive epsilon policy, and no-cluster diagnostics. |
 
 ### Hardware and interfaces
 
@@ -99,19 +102,19 @@ Points initially receive `SNR_UNKNOWN=0`. If TLV 7 is missing or cannot be appli
 
 A parsed point is retained only when:
 
-- Euclidean range is at least 0.20 m and at most 3.0 m.
+- Euclidean range is at least 0.20 m and at most 3.60 m. The radar deployment boundary remains 3.50 m; the extra 0.10 m is processing margin for quantization and range jitter.
 - Side-information SNR is available.
 - Raw SNR is at least 20.
 
-The filter records range rejections, unknown-SNR rejections, and low-SNR rejections for diagnostics.
+The filter records input and accepted range extrema plus range, unknown-SNR, and low-SNR rejection counts for diagnostics.
 
 ### 4. DBSCAN clustering
 
-- Neighborhood radius: strictly less than 0.15 m.
-- Configured minimum neighbors: 6.
-- Minimum retained cluster size: 6.
+- Neighborhood radius: strictly less than 0.15 m through 1.50 m, 0.20 m above 1.50 m through 2.50 m, and 0.25 m beyond 2.50 m.
+- Configured minimum: 5 total points including the seed.
+- Minimum retained cluster size: 5.
 
-The implementation excludes the point itself from the neighborhood list. Therefore, a core point requires six other neighbors—seven total points—even though the constant and documentation call this a six-point minimum.
+The implementation includes the point itself in both initial and expansion neighborhood lists, matching conventional DBSCAN `minPoints` semantics. On a no-cluster frame it reports accepted range, epsilon range, maximum total-neighbor count, and number of core candidates.
 
 Cluster centroid is the arithmetic mean of all DBSCAN-assigned points.
 
@@ -120,7 +123,7 @@ Cluster centroid is the arithmetic mean of all DBSCAN-assigned points.
 1. Calculate each point’s distance from the untrimmed cluster centroid.
 2. Find the median distance.
 3. Retain points whose distance is strictly less than 2.5 times that median.
-4. Require at least six trimmed points.
+4. Require at least five trimmed points.
 5. Recompute a trimmed centroid.
 6. Calculate axis-aligned X/Y/Z extents and sort the three extents largest-to-smallest as length, width, and height.
 7. Calculate geometric, SNR, density, and shape descriptors.
@@ -265,7 +268,7 @@ These thresholds are therefore much more permissive than their names/comments ma
 - Z bimodality is forced to zero below 20 points.
 - Local-density variance is forced to zero below 30 points.
 
-Because accepted clusters may have as few as seven effective points, zero can mean “insufficient samples” rather than a measured zero. In the user-provided nine-point sample, `planarity=0` and `thickness=0` are unavailable-feature sentinels despite nonzero bounding-box dimensions.
+Because accepted clusters may have as few as five points, zero can mean “insufficient samples” rather than a measured zero. In the user-provided nine-point sample, `planarity=0` and `thickness=0` are unavailable-feature sentinels despite nonzero bounding-box dimensions.
 
 The planarity approximation is axis-dependent and can score line-like clouds as highly planar. It is not a full PCA plane fit.
 
@@ -275,7 +278,7 @@ Descriptor validity requires all of the following:
 
 | Gate | Current threshold |
 |---|---|
-| Trimmed points | At least 6 |
+| Trimmed points | At least 5 |
 | Spread | At most 0.60 m |
 | Density | At least 25 points/m3 |
 | Mean raw SNR | At least 22 |
@@ -294,14 +297,14 @@ Quality is a heuristic average of four sub-scores:
 
 It is not a calibrated probability of object correctness or gun identity.
 
-For the reconstructed nine-point sample:
+For the reconstructed nine-point sample, the old six-point firmware printed 89%. With the current five-point denominator, the same values would produce:
 
 ```text
-point score   = 9 / 6 * 50 = 75
+point score   = 9 / 5 * 50 = 90
 spread score  = 100 * (1 - 0.1257 / 0.6) = 79.05
 SNR score     = capped at 100
 density score = capped at 100
-quality       = (75 + 79.05 + 100 + 100) / 4 = 88.51%, displayed as 89%
+quality       = (90 + 79.05 + 100 + 100) / 4 = 92.26%, displayed as 92%
 ```
 
 ### Calibration candidate, distance, and score
@@ -344,19 +347,29 @@ Radar frame 44: no points | packet=704B objects=15 TLVs=5 pointsTLV=no sideInfo=
 
 describes a separate radar frame. The packet header claimed 15 detected objects, but the parser did not execute valid point or side-information branches and encountered an unresolved/truncated TLV condition. It is not evidence of a truly empty scene. Determining whether the root cause was UART byte loss, unsupported TLV ordering, corrupt length data, or another boundary issue requires a raw packet capture.
 
+For accepted points that fail clustering, the current firmware prints:
+
+```text
+acceptedRange=min-max m epsRange=min-max m minPts=5 total maxNeighbors=N coreCandidates=N
+```
+
+`acceptedRange` is the Euclidean range span after filtering. `epsRange` shows which adaptive bands were used. `maxNeighbors` counts the seed point and is the largest neighborhood in the frame. `coreCandidates=0` proves no point reached the five-total-point density gate; a positive value with no retained cluster indicates a clustering/retention defect that requires source investigation.
+
 ## Current Detection Rules
 
 ### Point and cluster gates
 
 ```text
 RANGE_MIN                         = 0.20 m
-RANGE_MAX                         = 3.00 m
+RANGE_MAX                         = 3.60 m processing limit (3.50 m deployment boundary)
 MIN_SNR                           = 20 raw (~2.0 dB)
-DBSCAN_EPS                        = 0.15 m
-DBSCAN_MIN_POINTS                 = 6 other neighbors (effectively 7 total)
-MIN_CLUSTER_POINTS                = 6
-MIN_POINTS_FOR_OUTPUT             = 6
-MIN_POINTS_FOR_VALID_OBJECT       = 6
+DBSCAN_EPS_NEAR                   = 0.15 m through 1.50 m
+DBSCAN_EPS_MID                    = 0.20 m through 2.50 m
+DBSCAN_EPS_FAR                    = 0.25 m beyond 2.50 m
+DBSCAN_MIN_POINTS                 = 5 total points including seed
+MIN_CLUSTER_POINTS                = 5
+MIN_POINTS_FOR_OUTPUT             = 5
+MIN_POINTS_FOR_VALID_OBJECT       = 5
 MIN_POINTS_FOR_CONFIRMED_MATCH    = 15 (declared but unused)
 ```
 
@@ -456,14 +469,14 @@ clutter removal:  disabled
 GUI outputs:      detected points, range profile, side information/statistics
 ```
 
-The 0.30-3.50 m range supersedes the earlier 0.30-1.50 m decision and is the fixed testing, calibration, and deployment envelope for the current project phase. The radar CFAR range FOV now allows 3.50 m, but the ESP32 point filter still declares `RANGE_MAX=3.00 m`. Consequently, firmware currently rejects all parsed points beyond 3.00 m before clustering, regardless of radar detection or range-profile power.
+The 0.30-3.50 m range supersedes the earlier 0.30-1.50 m decision and is the fixed testing, calibration, and deployment envelope for the current project phase. The radar CFAR range FOV allows 3.50 m, and the ESP32 point filter allows 3.60 m so edge jitter is not rejected prematurely.
 
 Switching to the 16-, 48-, or 64-loop profiles changes Doppler processing, sensitivity, point-cloud density, and relative-power compensation. Any rule thresholds derived under one profile must record the exact profile and must not be assumed transferable.
 
 ## Known Limitations and Unresolved Risks
 
 1. **Raw SNR unit mismatch:** code and output use 0.1 dB raw units while thresholds resemble whole-dB values.
-2. **DBSCAN off-by-one semantics:** configured six-point core requires seven total points.
+2. **Adaptive clustering needs hardware validation:** the 0.15/0.20/0.25 m bands and five-total-point minimum are source-verified starting values but can merge clutter or fragment targets under real placement conditions.
 3. **Sparse-feature sentinels:** planarity/thickness are zero below 10 points, bimodality below 20, and density variance below 30.
 4. **Calibration/runtime mismatch:** PCA-based Python features differ from ESP32 axis-based features.
 5. **Unused confirmation setting:** `MIN_POINTS_FOR_CONFIRMED_MATCH=15` is never referenced.
@@ -485,7 +498,7 @@ Switching to the 16-, 48-, or 64-loop profiles changes Doppler processing, sensi
 21. **Window peak SNR is averaged:** `maxSnr` becomes the mean of per-frame maxima instead of the maximum across the window.
 22. **Calibration provenance is incomplete:** raw samples, active profile, range, orientation, firmware version, and per-feature dispersion are not retained.
 23. **Duplicate/weakly separated profiles:** `GUN`, `BOX`, and `gun` coexist as nearest-neighbor candidates without a labeled negative-set validation record.
-24. **No automated packet fixtures or build tests:** prior verification was mainly source checks and hardware logs.
+24. **No automated packet fixtures or Arduino build tests:** a source-contract policy test now exists, but it does not compile the sketch or replay real UART packets.
 25. **Insufficient evaluation data:** `output.md` is a mostly stationary, unlabeled session and cannot establish sensitivity, specificity, false-alert rate, or cross-range/orientation performance.
 
 ## Rule-Based Detection Direction
@@ -645,3 +658,23 @@ Copy this template for every repository change. Replace every field with concret
 - Rollback procedure: Restore the prior committed `output.md` if the project needs the earlier close-range capture as the primary artifact, and append a new ledger entry explaining which capture is authoritative. Revert the current-state capture descriptions without deleting either historical evidence entry.
 - Related commit: Not committed
 - Follow-up work: Approve a design that first aligns the range filter and corrects sparse-cluster semantics, then adds long-range diagnostics and range-aware power evidence before calibrating alert thresholds
+
+### 2026-07-13 - Implement range-adaptive five-point long-range clustering
+
+- Status: Implemented and source-contract verified; firmware build, flash, and hardware validation pending
+- Requested by: User, after the radar produced approximately nine to ten long-range gun-present points but firmware still reported no DBSCAN cluster
+- Objective: Allow sparse returns to form diagnosable clusters through the 3.50 m deployment boundary without relaxing calibration identity or alert thresholds
+- Files changed: `parsing_detailed/parsing_detailed.ino`; `tests/test_long_range_clustering_policy.py`; `docs/superpowers/specs/2026-07-13-long-range-clustering-design.md`; `docs/superpowers/plans/2026-07-13-long-range-clustering.md`; `PROJECT_RECORD.md`
+- Symbols/settings changed: `RANGE_MAX`; `DBSCAN_EPS_NEAR`; `DBSCAN_EPS_MID`; `DBSCAN_EPS_FAR`; `DBSCAN_NEAR_RANGE_MAX`; `DBSCAN_MID_RANGE_MAX`; `DBSCAN_MIN_POINTS`; `MIN_CLUSTER_POINTS`; `MIN_POINTS_FOR_OUTPUT`; `MIN_POINTS_FOR_VALID_OBJECT`; `FilterDiagnostics`; new `DbscanDiagnostics`; new `adaptiveDbscanEps()`; `filterPoints()`; `clusterDBSCAN()`; zero-accepted and no-cluster serial diagnostics; Project file roles; Runtime Data Flow; Metric Reference; Current Detection Rules; Radar Configuration Baseline; Known Limitations; Change Ledger
+- Previous behavior: Firmware rejected points beyond 3.00 m. DBSCAN used one fixed 0.15 m radius, excluded the seed, and required six other neighbors, so a core point effectively needed seven total points. Cluster retention, descriptor output, and validity each required six points. No-cluster output exposed only filtered count, fixed epsilon, and configured minimum, so it could not distinguish sparse neighborhoods from range-dependent point dispersion.
+- New behavior: Firmware processes through 3.60 m while the radar/deployment boundary remains 3.50 m. DBSCAN uses 0.15 m through 1.50 m, 0.20 m above 1.50 m through 2.50 m, and 0.25 m beyond 2.50 m. Neighborhoods include the seed and require five total points. Cluster retention, descriptor output, and validity require five points. Failure output reports input/accepted range spans, adaptive epsilon span, maximum total neighbors, and core-candidate count.
+- Detailed implementation: Added named adaptive-policy constants and `adaptiveDbscanEps(float)`. Extended filtering diagnostics with input and accepted range extrema. Added a read-only DBSCAN diagnostic prepass that measures the epsilon bands and total-neighbor density for every filtered point, including frames too sparse to cluster. Removed both seed-exclusion branches so initial and expansion neighborhoods use conventional total-point semantics. Passed `DbscanDiagnostics` through the clustering call and expanded serial failure messages. Added an approved design, executable implementation plan, and Python source-contract regression suite. Calibration distance, match thresholds, temporal gates, LED control, buzzer control, and relative-power classification were intentionally unchanged.
+- Reason and evidence: The saved long-range capture showed 651 points rejected at the old 3.00 m filter and a separate six-filtered-point frame that could not satisfy the effective seven-point DBSCAN rule. The user then reported approximately nine to ten radar points near 3 m with no cluster. Point separation grows with range for a fixed angular separation, so a bounded range-adaptive radius is safer than globally increasing epsilon.
+- System impact: Long-range point sets can now reach clustering and descriptor generation. The five-point minimum and far-range 0.25 m radius increase sensitivity and false-cluster exposure. Extra diagnostic work is an O(n squared) prepass in addition to DBSCAN's existing O(n squared) searches; expected point counts are small, but ESP32 timing must be observed. Classification and alert behavior remain unchanged, so cluster formation alone does not guarantee a gun match or buzzer/LED activation.
+- Risks and trade-offs: Far-range clutter can merge within 0.25 m, five-point noise groups can become candidates, and outlier trimming can still reduce a five-point cluster below five. Sparse descriptors still force planarity/thickness to zero below ten points, bimodality below twenty, and density variance below thirty; current calibration distance still treats those sentinels as numeric values. The source-contract tests do not compile C++ or validate Arduino library compatibility.
+- Verification performed: Created the regression test before firmware edits; ran `python -m unittest tests.test_long_range_clustering_policy -v` against the old firmware; implemented the minimum behavior; reran the same command; searched all `DBSCAN_EPS` and `clusterDBSCAN(` references; inspected available build commands with PowerShell `Get-Command`; ran `git diff --check`; compared protected calibration, temporal, LED, buzzer, and alert constants between `HEAD` and the working firmware; counted opening/closing braces; inspected Git status and the working-tree diff.
+- Verification results: The red run exited 1 with all five test methods failing and 16 failing assertions/subtests for the absent policy. The first combined final verifier stopped after a naive string count treated the mandatory plan header's inline checkbox example as an unfinished task; firmware tests and `git diff --check` had already passed in that run. The corrected line-anchored verifier exited 0: five tests passed in 0.003 seconds, `git diff --check` returned 0 with only Git line-ending warnings, protected constants reported an empty changed list, brace counts matched at 259 opening and 259 closing braces, and zero actual checklist lines remained unchecked. No `g++`, `clang++`, or `arduino-cli` command was available in the workspace shell, so no firmware compilation was performed.
+- Hardware validation required/completed: Required and not yet performed on the modified firmware. Flash `parsing_detailed/parsing_detailed.ino`, retain the balanced 32-loop 0.30-3.50 m profile, and capture gun-present output near 1.0, 2.0, 3.0, 3.3, and 3.5 m. For any no-cluster frame, preserve the new range, epsilon, neighbor, and core-candidate fields. Also run an empty scene before using the new cluster policy as a basis for alert tuning.
+- Rollback procedure: Restore `RANGE_MAX=3.0`, fixed `DBSCAN_EPS=0.15`, seed-excluding neighborhood loops, and the four six-point gates; remove the new diagnostics/tests/spec/plan; restore affected current-state documentation; append a superseding rollback ledger entry rather than deleting this history.
+- Related commit: Not committed
+- Follow-up work: Hardware-test cluster formation first. If stable tracks appear, use their saved range-profile, SNR, geometry, point-count, and temporal data to design the separate range-aware gun evidence and LED/buzzer activation stage.

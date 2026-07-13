@@ -67,13 +67,21 @@ const float RANGE_BIN_SIZE_METERS = 0.0381529018f;
 const float RANGE_PROFILE_RAW_TO_DB = 0.031357291215f;
 const float RANGE_PROFILE_FFT_COMPENSATION_DB = -18.061799740f;
 
-// Clustering parameters
-const float DBSCAN_EPS = 0.15;
-const int DBSCAN_MIN_POINTS = 6;
+// Range-adaptive clustering parameters. At longer range, the same angular
+// separation produces a larger Cartesian point spacing.
+const float DBSCAN_EPS_NEAR = 0.15;
+const float DBSCAN_EPS_MID = 0.20;
+const float DBSCAN_EPS_FAR = 0.25;
+const float DBSCAN_NEAR_RANGE_MAX = 1.50;
+const float DBSCAN_MID_RANGE_MAX = 2.50;
+// DBSCAN minPoints is the total neighborhood size including the seed point.
+const int DBSCAN_MIN_POINTS = 5;
 
 // Range filtering
 const float RANGE_MIN = 0.20;
-const float RANGE_MAX = 3.0;
+// The radar deployment boundary is 3.50 m. Keep 10 cm of processing margin
+// for quantization and point-to-point range jitter at the edge.
+const float RANGE_MAX = 3.60;
 
 // SNR threshold
 const int MIN_SNR = 20;
@@ -83,11 +91,11 @@ const int MIN_SNR = 20;
 const uint16_t SNR_UNKNOWN = 0;
 
 // Minimum cluster size
-const int MIN_CLUSTER_POINTS = 6;
-const int MIN_POINTS_FOR_OUTPUT = 6;
+const int MIN_CLUSTER_POINTS = 5;
+const int MIN_POINTS_FOR_OUTPUT = 5;
 
 // ===== NEW: GHOST REJECTION SETTINGS =====
-const int MIN_POINTS_FOR_VALID_OBJECT = 6;
+const int MIN_POINTS_FOR_VALID_OBJECT = 5;
 const int MIN_POINTS_FOR_CONFIRMED_MATCH = 15;
 
 // Spatial coherence requirements
@@ -1318,15 +1326,40 @@ struct FilterDiagnostics {
   size_t rangeRejected;
   size_t snrUnknown;
   size_t snrBelowThreshold;
+  float inputMinRange;
+  float inputMaxRange;
+  float acceptedMinRange;
+  float acceptedMaxRange;
 
   FilterDiagnostics()
     : inputCount(0), acceptedCount(0), rangeRejected(0), snrUnknown(0),
-      snrBelowThreshold(0) {}
+      snrBelowThreshold(0), inputMinRange(999999.0f), inputMaxRange(0.0f),
+      acceptedMinRange(999999.0f), acceptedMaxRange(0.0f) {}
 };
+
+struct DbscanDiagnostics {
+  size_t maxNeighborCount;
+  size_t coreCandidateCount;
+  float minEps;
+  float maxEps;
+
+  DbscanDiagnostics()
+    : maxNeighborCount(0), coreCandidateCount(0),
+      minEps(999999.0f), maxEps(0.0f) {}
+};
+
+float adaptiveDbscanEps(float rangeMeters) {
+  if (rangeMeters <= DBSCAN_NEAR_RANGE_MAX) return DBSCAN_EPS_NEAR;
+  if (rangeMeters <= DBSCAN_MID_RANGE_MAX) return DBSCAN_EPS_MID;
+  return DBSCAN_EPS_FAR;
+}
 
 // Explicit prototype prevents the Arduino sketch preprocessor from emitting
 // this declaration before the custom return type above is defined.
 FilterDiagnostics filterPoints(std::vector<RadarPoint>& points);
+void clusterDBSCAN(const std::vector<RadarPoint>& points,
+                   std::vector<ClusterData>& clusters,
+                   DbscanDiagnostics& diagnostics);
 
 FilterDiagnostics filterPoints(std::vector<RadarPoint>& points) {
   FilterDiagnostics diagnostics;
@@ -1335,6 +1368,8 @@ FilterDiagnostics filterPoints(std::vector<RadarPoint>& points) {
   filtered.reserve(points.size());
   for (const auto& pt : points) {
     float range = sqrt(pt.x*pt.x + pt.y*pt.y + pt.z*pt.z);
+    diagnostics.inputMinRange = min(diagnostics.inputMinRange, range);
+    diagnostics.inputMaxRange = max(diagnostics.inputMaxRange, range);
     if (range < RANGE_MIN || range > RANGE_MAX) {
       diagnostics.rangeRejected++;
       continue;
@@ -1348,6 +1383,8 @@ FilterDiagnostics filterPoints(std::vector<RadarPoint>& points) {
       continue;
     }
     filtered.push_back(pt);
+    diagnostics.acceptedMinRange = min(diagnostics.acceptedMinRange, range);
+    diagnostics.acceptedMaxRange = max(diagnostics.acceptedMaxRange, range);
   }
   points = filtered;
   diagnostics.acceptedCount = points.size();
@@ -1355,7 +1392,28 @@ FilterDiagnostics filterPoints(std::vector<RadarPoint>& points) {
 }
 
 void clusterDBSCAN(const std::vector<RadarPoint>& points,
-                   std::vector<ClusterData>& clusters) {
+                   std::vector<ClusterData>& clusters,
+                   DbscanDiagnostics& diagnostics) {
+
+  // Calculate diagnostics for every point, including frames too sparse to
+  // create a cluster. Neighborhood counts are total points including seed.
+  for (size_t i = 0; i < points.size(); i++) {
+    Point3D pi(points[i].x, points[i].y, points[i].z);
+    float eps = adaptiveDbscanEps(pi.norm());
+    diagnostics.minEps = min(diagnostics.minEps, eps);
+    diagnostics.maxEps = max(diagnostics.maxEps, eps);
+
+    size_t totalNeighbors = 0;
+    for (size_t j = 0; j < points.size(); j++) {
+      Point3D pj(points[j].x, points[j].y, points[j].z);
+      if (pi.distanceTo(pj) < eps) totalNeighbors++;
+    }
+    diagnostics.maxNeighborCount = max(diagnostics.maxNeighborCount,
+                                       totalNeighbors);
+    if ((int)totalNeighbors >= DBSCAN_MIN_POINTS) {
+      diagnostics.coreCandidateCount++;
+    }
+  }
 
   if (points.size() < (size_t)DBSCAN_MIN_POINTS) return;
 
@@ -1370,13 +1428,14 @@ void clusterDBSCAN(const std::vector<RadarPoint>& points,
     std::vector<size_t> neighbors;
     neighbors.reserve(50);
     Point3D pi(points[i].x, points[i].y, points[i].z);
+    float eps = adaptiveDbscanEps(pi.norm());
 
     for (size_t j = 0; j < points.size(); j++) {
-      if (i == j) continue;
       Point3D pj(points[j].x, points[j].y, points[j].z);
-      if (pi.distanceTo(pj) < DBSCAN_EPS) neighbors.push_back(j);
+      if (pi.distanceTo(pj) < eps) neighbors.push_back(j);
     }
 
+    // DBSCAN_MIN_POINTS is total points including seed.
     if ((int)neighbors.size() < DBSCAN_MIN_POINTS) {
       labels[i] = NOISE;
       continue;
@@ -1403,12 +1462,12 @@ void clusterDBSCAN(const std::vector<RadarPoint>& points,
       labels[nIdx] = clusterID;
 
       Point3D pn(points[nIdx].x, points[nIdx].y, points[nIdx].z);
+      float subEps = adaptiveDbscanEps(pn.norm());
       std::vector<size_t> subNeighbors;
       subNeighbors.reserve(32);
       for (size_t j = 0; j < points.size(); j++) {
-        if (nIdx == j) continue;
         Point3D pj(points[j].x, points[j].y, points[j].z);
-        if (pn.distanceTo(pj) < DBSCAN_EPS) {
+        if (pn.distanceTo(pj) < subEps) {
           subNeighbors.push_back(j);
         }
       }
@@ -1663,12 +1722,14 @@ void loop() {
   const FilterDiagnostics filterInfo = filterPoints(points);
   const size_t filteredPointCount = points.size();
   if (points.empty()) {
-    Serial.printf("Radar frame %lu: %u raw, 0 accepted | range=%u unknownSNR=%u lowSNR=%u | sideInfo=%s malformed=%s TLVs=[",
+    Serial.printf("Radar frame %lu: %u raw, 0 accepted | range=%u unknownSNR=%u lowSNR=%u inputRange=%.2f-%.2fm | sideInfo=%s malformed=%s TLVs=[",
                   (unsigned long)parserInfo.frameNumber,
                   (unsigned)filterInfo.inputCount,
                   (unsigned)filterInfo.rangeRejected,
                   (unsigned)filterInfo.snrUnknown,
                   (unsigned)filterInfo.snrBelowThreshold,
+                  filterInfo.inputMinRange,
+                  filterInfo.inputMaxRange,
                   parserInfo.sideInfoTlvSeen ? "yes" : "no",
                   parserInfo.malformed ? "yes" : "no");
     for (uint8_t i = 0; i < parserInfo.tlvTypeCount; i++) {
@@ -1681,11 +1742,17 @@ void loop() {
   }
 
   std::vector<ClusterData> clusters;
-  clusterDBSCAN(points, clusters);
+  DbscanDiagnostics dbscanInfo;
+  clusterDBSCAN(points, clusters, dbscanInfo);
   if (clusters.empty()) {
-    Serial.printf("Radar frame %lu: %u filtered points, no DBSCAN cluster (eps=%.2fm minPts=%d)\n",
+    Serial.printf("Radar frame %lu: %u filtered points, no DBSCAN cluster | acceptedRange=%.2f-%.2fm epsRange=%.2f-%.2fm minPts=%d total maxNeighbors=%u coreCandidates=%u\n",
                   (unsigned long)parserInfo.frameNumber,
-                  (unsigned)filteredPointCount, DBSCAN_EPS, DBSCAN_MIN_POINTS);
+                  (unsigned)filteredPointCount,
+                  filterInfo.acceptedMinRange, filterInfo.acceptedMaxRange,
+                  dbscanInfo.minEps, dbscanInfo.maxEps,
+                  DBSCAN_MIN_POINTS,
+                  (unsigned)dbscanInfo.maxNeighborCount,
+                  (unsigned)dbscanInfo.coreCandidateCount);
     delay(10);
     return;
   }
