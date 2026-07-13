@@ -20,10 +20,10 @@ Historical ledger entries are append-only. If an earlier entry is incomplete or 
 ### Repository state
 
 - Baseline date: 2026-07-13
-- Branch: `main`
-- Baseline commit: `2bb9bd0` (`updated_requirement`)
-- Remote state at reconstruction time: `main...origin/main`
-- Working tree before this documentation change: clean
+- Branch: `BEFORE_CONFIG_TWEAKS`
+- Baseline commit: `107c222` (`inc_range_firmwarre`)
+- Remote state before the current edit: `BEFORE_CONFIG_TWEAKS...origin/BEFORE_CONFIG_TWEAKS`
+- Working tree: contains the current uncommitted long-range alert-signature implementation
 - Canonical detection firmware: `parsing_detailed/parsing_detailed.ino`
 - Firmware build or hardware test performed during reconstruction: no; the reconstruction was read-only
 - Latest baseline commit purpose: commit the 3.50 m requirement, updated balanced radar profile, long-range rejection capture, and corresponding project-record evidence
@@ -47,7 +47,7 @@ There is no build manifest or README that formally declares the canonical sketch
 | `cfg_profiles/iwr6843aop_gun_high_sensitivity_64loops_12db.cfg` | Higher-sensitivity profile: 64 loops, 12 dB range and Doppler CFAR. |
 | `oprimized_config.cfg` | Older experimental profile using 48 loops, 50 ms frames, clutter removal, wider angular FOV, and a 0.10–2.00 m range FOV. |
 | `xwr68xx_AOP_profile_2026_01_29T17_01_51_013.cfg` | Earlier Visualizer-generated 16-loop profile. |
-| `output.md` | Current user-saved long-range gun-present diagnostic capture. It contains pre-classifier rejection evidence for radar frames 4134-4220 but no accepted object descriptor or firmware range-profile reading. It is not a complete labeled validation dataset. |
+| `output.md` | Latest user-saved gun-present capture near 3.0 m from the long-range signature firmware. Stable track 1144 supplies 64 consecutive `gun`-candidate samples that expose the original maximum-length/width rejection. It contains no negative-object cases. |
 | `fixes_plan.md` | Earlier repair plan. Some items were implemented and some were not. It is not the source of truth for current behavior. |
 | `detection_fix_plan.md` | Later tuning/repair proposal. Several recommendations were superseded or remain unimplemented. |
 | `docs/superpowers/specs/2026-07-11-relaxed-point-thresholds-design.md` | Approved design that retained `DBSCAN_EPS=0.15 m` and aligned four point-count gates at six. |
@@ -55,6 +55,10 @@ There is no build manifest or README that formally declares the canonical sketch
 | `docs/superpowers/specs/2026-07-13-long-range-clustering-design.md` | Approved 3.50 m clustering design: processing margin, five-total-point semantics, adaptive epsilon bands, and diagnostic requirements. |
 | `docs/superpowers/plans/2026-07-13-long-range-clustering.md` | Implementation and verification checklist for the approved long-range clustering stage. |
 | `tests/test_long_range_clustering_policy.py` | Source-contract regression tests for the range margin, five-point gates, seed-inclusive DBSCAN, adaptive epsilon policy, and no-cluster diagnostics. |
+| `docs/superpowers/specs/2026-07-13-long-range-alert-signature-design.md` | Design and evidence bounds for the scenario-specific 2.70-3.60 m gun signature. |
+| `docs/superpowers/plans/2026-07-13-long-range-alert-signature.md` | Implementation and validation checklist for the long-range alert stage. |
+| `docs/superpowers/plans/2026-07-13-expand-long-range-geometry.md` | Approved and completed red-green plan for expanding only the disproven long-range length/width maxima. |
+| `tests/test_long_range_alert_policy.py` | Capture-replay and source-contract tests for long-range gates, per-track state, temporal confirmation, and alert-path integration. |
 
 ### Hardware and interfaces
 
@@ -140,13 +144,13 @@ Geometry and SNR use the trimmed points. Printed position, radial velocity, and 
 - At most 32 tracks are retained.
 - Tracks older than 10 tracker updates are erased.
 
-Early returns for no packet, no points, no accepted points, no cluster, or no descriptor occur before `tracker.update()`. Consequently, tracks do not age and temporal counters do not change on those radar frames.
+Early returns occur before `tracker.update()`, so legacy track age and calibration counters still freeze. A successfully parsed radar frame that has no points, no accepted points, no cluster, or no descriptor explicitly calls `resetAllLongRangeGunEvidence()` so the new five-hit signature cannot bridge those rejected frames. A UART read that produces no complete radar frame does not reset evidence.
 
 ### 7. Calibration matching and alerting
 
 After enough valid detections, the tracker averages recent descriptor fields and compares the result with every object in the SPIFFS calibration JSON. The nearest calibration record becomes the displayed candidate even when it is outside the acceptance threshold.
 
-An alert requires all of the following:
+The original calibration-confirmed alert path requires all of the following:
 
 1. A usable measured track that is not ghost or low-quality.
 2. At least six valid-quality associated descriptors before matching begins.
@@ -156,7 +160,7 @@ An alert requires all of the following:
 6. Calibration key equal to `gun`, case-insensitively.
 7. Track state equal to `CONFIRMED`.
 
-When these conditions are met, the LED activates and the buzzer toggles for three seconds.
+The scenario-specific long-range path is independent of identity acquisition and requires five consecutive measured updates on one track that all have: a valid descriptor; nearest candidate `gun`; candidate distance at most 0.55; range 2.70-3.60 m; available range-profile power of at least 75.0 relative dB; length 0.18-0.55 m; width 0.07-0.55 m; raw mean SNR at least 100; quality at least 80%; and at least five descriptor points. A failed or unmeasured update resets this evidence. Either confirmed path activates the same LED and three-second toggling-buzzer alert.
 
 ## Metric Reference
 
@@ -211,13 +215,15 @@ bin 53 -> 53 * 0.0381529018 = 2.0221 m
 
 This is relative power, not dBm, calibrated RCS, or uniquely cluster-associated energy. Objects at similar ranges can use the same range-profile peak. The conversion is hard-coded for the balanced 128-range-bin/32-Doppler-bin profile and must be revisited if the active radar profile changes.
 
-Range-profile power is currently display-only. It does not participate in filtering, validity, quality, calibration distance, identity confirmation, or alerting.
+Range-profile power remains excluded from point filtering, descriptor validity/quality, calibration distance, and the original identity-confirmation path. It now participates only as one mandatory input to the bounded long-range signature. Missing TLV 2 fails that frame's long-range evidence.
 
 On 2026-07-13, the user reported that the updated balanced profile detected the gun at approximately 1.1 m with approximately 98 relative dB in the mmWave Demo Visualizer. This is a user-reported hardware observation, not an independently verified measurement or a committed labeled capture. It must not be treated as a final gun threshold: range, orientation, clutter, competing objects, and the global range-profile ambiguity can all change the value.
 
-Later on 2026-07-13, the user changed the target deployment distance to 3.5 m and reported mmWave Demo Visualizer observations of approximately 80.21 relative dB at approximately 3.3 m and 77.54 relative dB at approximately 3.2 m. The subsequently saved `output.md` confirms the firmware-side failure but cannot confirm those power values: every target-like point set is rejected before a track exists, and the firmware prints range-profile power only for displayed tracks. The power values therefore remain user-reported Visualizer observations.
+Later on 2026-07-13, the user changed the target deployment distance to 3.5 m and reported mmWave Demo Visualizer observations of approximately 80.21 relative dB at approximately 3.3 m and 77.54 relative dB at approximately 3.2 m. Those two values remain user-reported Visualizer observations.
 
-The saved long-range capture contains 82 diagnostic radar-frame records from sensor frame 4134 through 4220, with frames 4192-4196 absent. In 74 records, all 651 parsed points were rejected by the range filter (`rangeRejected=651`, `unknownSNR=0`, `lowSNR=0`). The remaining eight records reached DBSCAN with 20 total filtered points distributed as one to six points per frame; none formed a cluster. No object descriptor, calibration candidate, relative-power line, gun identity, LED alert, or buzzer alert was produced.
+The previous committed positive capture near 3.0 m shows stable track 99 with range 3.0128-3.0130 m, power 81.53-81.81 relative dB, raw mean SNR 134.556-159.667, length 21.97-25.00 cm, width 10.26-10.77 cm, point count 9, quality 91-92%, and 52 nearest-candidate `gun` distances of 0.4927-0.4982.
+
+The latest user-saved `output.md` at approximately the same placement contains 64 consecutive stable track-1144 `gun` candidates. Range is 3.0298-3.0467 m, power is 83.57-83.85 relative dB, raw mean SNR is 140.067-158.000, length is 42.94-48.89 cm, width is 10.02-47.35 cm, point count is 12-15, quality is 84-90%, and candidate distance is 0.3381-0.3710. All 64 frames passed every original long-range gate except length; all failed the 30 cm maximum, and 61 also failed the 16 cm width maximum. No early-return radar diagnostics interrupted the displayed sequence. These two positive captures demonstrate horizontal DBSCAN footprint variability but still do not measure false-positive performance.
 
 ### Velocity
 
@@ -404,6 +410,23 @@ MAX_TRACK_AGE              = 10 tracker updates
 MAX_TRACKS                 = 32
 ```
 
+### Scenario-specific long-range gun gates
+
+```text
+LONG_RANGE_GUN_MIN_RANGE              = 2.70 m
+LONG_RANGE_GUN_MAX_RANGE              = 3.60 m
+LONG_RANGE_GUN_MIN_POWER_DB           = 75.0 relative dB
+LONG_RANGE_GUN_MAX_CANDIDATE_DISTANCE = 0.55
+LONG_RANGE_GUN_MIN_LENGTH             = 0.18 m
+LONG_RANGE_GUN_MAX_LENGTH             = 0.55 m
+LONG_RANGE_GUN_MIN_WIDTH              = 0.07 m
+LONG_RANGE_GUN_MAX_WIDTH              = 0.55 m
+LONG_RANGE_GUN_MIN_MEAN_SNR           = 100 raw (~10.0 dB)
+LONG_RANGE_GUN_MIN_QUALITY            = 80%
+LONG_RANGE_GUN_MIN_POINTS             = 5
+LONG_RANGE_GUN_REQUIRED_HITS          = 5 consecutive measured updates
+```
+
 The 0.40 exit threshold is not fully effective: `findMatch()` rejects distances at or above 0.25 and the caller clears the match before the 0.40 hysteresis branch can retain it.
 
 ## Calibration Architecture
@@ -484,7 +507,7 @@ Switching to the 16-, 48-, or 64-loop profiles changes Doppler processing, sensi
 7. **Misleading candidate threshold:** printed 0.25 is not the stricter 0.20 entry threshold.
 8. **Ineffective exit hysteresis:** matches at 0.25 or above are cleared before the 0.40 exit threshold can retain them.
 9. **Fixed-rate track velocity:** multiplying displacement by 10 ignores skipped frames and other frame periods.
-10. **Temporal state freezes across early returns:** “consecutive” detections are not strictly consecutive radar frames.
+10. **Legacy temporal state freezes across early returns:** calibration/tracker “consecutive” counters are not strictly consecutive radar frames. The new long-range signature separately resets on parsed radar frames rejected before tracking.
 11. **High-quality counter behavior:** descriptors with quality from 40 through 70 reset the valid counter but do not reset the high-quality counter.
 12. **Mixed point populations:** position/velocity/noise and geometry/SNR may refer to different trimmed/untrimmed sets.
 13. **Side-information alignment risk:** invalid TLV-1 points are dropped before TLV-7 values are assigned, which can shift later SNR/noise associations.
@@ -498,8 +521,9 @@ Switching to the 16-, 48-, or 64-loop profiles changes Doppler processing, sensi
 21. **Window peak SNR is averaged:** `maxSnr` becomes the mean of per-frame maxima instead of the maximum across the window.
 22. **Calibration provenance is incomplete:** raw samples, active profile, range, orientation, firmware version, and per-feature dispersion are not retained.
 23. **Duplicate/weakly separated profiles:** `GUN`, `BOX`, and `gun` coexist as nearest-neighbor candidates without a labeled negative-set validation record.
-24. **No automated packet fixtures or Arduino build tests:** a source-contract policy test now exists, but it does not compile the sketch or replay real UART packets.
-25. **Insufficient evaluation data:** `output.md` is a mostly stationary, unlabeled session and cannot establish sensitivity, specificity, false-alert rate, or cross-range/orientation performance.
+24. **No automated packet fixtures or Arduino build tests:** source-contract and text-capture replay tests exist, but they do not compile the sketch or replay binary UART packets.
+25. **Positive-only alert tuning:** the aggressive long-range signature now covers two stationary gun-present captures at approximately 3 m but still cannot establish sensitivity, specificity, false-alert rate, or cross-range/orientation performance.
+26. **Long-range power is not object-isolated:** another reflector at a similar range can supply the TLV-2 peak used by a track and help a false candidate pass.
 
 ## Rule-Based Detection Direction
 
@@ -515,7 +539,7 @@ Relative power, SNR, geometry, shape, velocity, and temporal stability can contr
 - Raw per-frame telemetry rather than confirmed-only summaries.
 - Separate development/tuning and held-out validation captures.
 
-Future rules should explicitly handle missing shape features, normalize or stratify range-dependent power, aggregate evidence over time, and measure false positives as well as detection rate.
+The current long-range signature is a provisional, scenario-specific rule that aggregates five consecutive frames and requires candidate, range, power, broad geometry, raw SNR, quality, and point-count gates. Its 0.55 m horizontal maxima intentionally tolerate the large footprint change observed between two gun-present captures. Future revisions should normalize or stratify range-dependent power, explicitly handle missing shape features, and measure false positives as well as detection rate.
 
 For the current phase, all labeled captures, power bands, calibration profiles, acceptance tests, and deployment claims must cover 0.30-3.50 m using `cfg_profiles/iwr6843aop_gun_balanced_32loops_14db.cfg`. Relative power will be supporting metal evidence rather than sufficient proof of a gun, because other metal objects can also produce strong returns. Long-range rules must explicitly handle five-to-six-point returns and the lack of shape features that are forced to zero below ten points.
 
@@ -678,3 +702,43 @@ Copy this template for every repository change. Replace every field with concret
 - Rollback procedure: Restore `RANGE_MAX=3.0`, fixed `DBSCAN_EPS=0.15`, seed-excluding neighborhood loops, and the four six-point gates; remove the new diagnostics/tests/spec/plan; restore affected current-state documentation; append a superseding rollback ledger entry rather than deleting this history.
 - Related commit: Not committed
 - Follow-up work: Hardware-test cluster formation first. If stable tracks appear, use their saved range-profile, SNR, geometry, point-count, and temporal data to design the separate range-aware gun evidence and LED/buzzer activation stage.
+
+### 2026-07-13 - Add a temporally confirmed 3-metre gun alert signature
+
+- Status: Implemented and source/capture-contract verified; Arduino compilation, flashing, negative-case testing, and hardware alert validation pending
+- Requested by: User, after saving a new gun-present `output.md` near 3 m on branch `BEFORE_CONFIG_TWEAKS`
+- Objective: Make the existing GPIO11 LED and GPIO12 buzzer activate for repetitions of the captured long-range gun scenario while avoiding a global relaxation of the original calibration matcher
+- Files changed: `parsing_detailed/parsing_detailed.ino`; `tests/test_long_range_alert_policy.py`; `docs/superpowers/specs/2026-07-13-long-range-alert-signature-design.md`; `docs/superpowers/plans/2026-07-13-long-range-alert-signature.md`; `PROJECT_RECORD.md`
+- Symbols/settings changed: new `LONG_RANGE_GUN_MIN_RANGE`; `LONG_RANGE_GUN_MAX_RANGE`; `LONG_RANGE_GUN_MIN_POWER_DB`; `LONG_RANGE_GUN_MAX_CANDIDATE_DISTANCE`; `LONG_RANGE_GUN_MIN_LENGTH`; `LONG_RANGE_GUN_MAX_LENGTH`; `LONG_RANGE_GUN_MIN_WIDTH`; `LONG_RANGE_GUN_MAX_WIDTH`; `LONG_RANGE_GUN_MIN_MEAN_SNR`; `LONG_RANGE_GUN_MIN_QUALITY`; `LONG_RANGE_GUN_MIN_POINTS`; `LONG_RANGE_GUN_REQUIRED_HITS`; new `TrackedObject::consecutiveLongRangeGunHits`; `longRangeGunEvidenceThisFrame`; `longRangeGunConfirmed`; `longRangePowerAvailable`; `longRangePowerDb`; `longRangePowerRange`; `longRangePowerRaw`; new `evaluateLongRangeGunSignature()`; new `resetAllLongRangeGunEvidence()`; tracker initialization; `loop()` early-return resets, match/evidence evaluation, `gunDetected` aggregation, object identity output, and evidence telemetry; Current Verified Baseline; Project file roles; Runtime Data Flow; Calibration matching and alerting; Range-profile relative power; Current Detection Rules; Known Limitations; Rule-Based Detection Direction; Change Ledger
+- Previous behavior: Adaptive clustering produced a stable nine-point track near 3.013 m and consistently displayed nearest candidate `gun`, but candidate distance 0.4927-0.4982 exceeded both `SHAPE_DESCRIPTOR_TOLERANCE=0.25` and `MATCH_ENTER_THRESHOLD=0.20`. The firmware therefore never populated `matchedName`, never satisfied the original confirmed-gun condition, and did not activate the LED or buzzer. Relative power was telemetry-only.
+- New behavior: The original general matcher and its 0.25/0.20/0.40 thresholds are unchanged. A separate 2.70-3.60 m path passes a measured frame only when the valid descriptor's nearest candidate is `gun`, candidate distance is at most 0.55, relative power is available and at least 75.0 dB, length is 0.18-0.30 m, width is 0.07-0.16 m, raw mean SNR is at least 100, quality is at least 80%, and point count is at least five. Five consecutive passing updates on the same track confirm the signature and feed the existing `gunDetected` alert path.
+- Detailed implementation: Added named scenario constants and per-track evidence/power state with explicit initialization. `evaluateLongRangeGunSignature()` selects the strongest TLV-2 bin within the existing +/-2-bin window around track range, applies every gate conjunctively, increments a counter capped at five, and resets the counter and confirmation on any evaluated failure or unmeasured track. `resetAllLongRangeGunEvidence()` additionally clears every active track when a parsed radar frame exits for no points, no accepted points, no cluster, or no descriptor. Evaluation runs after `updateMatchWithHysteresis()` so the nearest candidate is current. Confirmed signature state activates the existing alert manager and prints `GUN DETECTED`, `LONG-RANGE GUN SIGNATURE`, plus per-frame pass/hit/confirmation/power telemetry. Added a capture replay and source-contract test, design record, and implementation plan.
+- Reason and evidence: Stable track 99 appears in 53 displayed capture rows; 52 contain a candidate distance. The captured ranges are 3.0128-3.0130 m, powers 81.53-81.81 relative dB, raw mean SNR values 134.556-159.667, lengths 0.2197-0.2500 m, widths 0.1026-0.1077 m, point count 9, quality 91-92%, and `gun` candidate distances 0.4927-0.4982. This proves cluster formation is no longer the blocker and motivates a bounded multi-feature override instead of accepting every calibration candidate below 0.55.
+- System impact: A stable track matching the new long-range signature can now activate the existing three-second LED/buzzer alert even when the original calibrated identity is not acquired. Missing TLV 2, one failing gate, or one parsed radar frame rejected before tracking immediately clears consecutive evidence. The added per-track state is small; evaluation reuses the existing bounded range-profile scan. Close-range and non-`gun` candidates continue through the original matcher only.
+- Risks and trade-offs: The thresholds are deliberately aggressive and derived from one stationary positive capture. A similarly sized metal object can become nearest candidate `gun`, and the global range-profile peak can come from another reflector at a similar range. Five-hit confirmation suppresses isolated frames but does not prove object identity. The lower 75 dB floor incorporates the user's earlier reported 77.54 dB long-range observation, not a committed negative-separated measurement. False positives and misses across orientation, placement, clutter, and the full 3.50 m boundary remain unknown.
+- Verification performed: Wrote the initial replay/source-contract test before constants and integration; ran it against the incomplete implementation; added a tracker-declaration/initialization contract after source inspection found missing C++ fields; observed that focused test fail before the fix; declared and initialized the fields; added and observed a failing early-return reset contract before implementing `resetAllLongRangeGunEvidence()`; ran `$env:PYTHONDONTWRITEBYTECODE='1'; python -m unittest tests.test_long_range_clustering_policy tests.test_long_range_alert_policy -v`; ran `git diff --check`; counted sketch braces; compared protected match, GPIO, and alert constants with `HEAD`; queried `Get-Command` for `arduino-cli`, `g++`, and `clang++`.
+- Verification results: The first red alert-policy run exited 1 while the capture replay passed and absent constants/integration produced 17 failing subtests. The focused tracker-state test then exited 1 with 14 failing declaration/initialization subtests, exposing a compile-blocking incomplete edit. The focused rejected-frame reset test also exited 1 before its helper and calls existed. After correction, the combined verifier exited 0: ten tests passed in 0.036 seconds; the replay accepted at least 50 stable track-99 rows; `git diff --check` exited 0 with only line-ending warnings; opening and closing brace counts both equal 268; `SHAPE_DESCRIPTOR_TOLERANCE`, `MATCH_ENTER_THRESHOLD`, `MATCH_EXIT_THRESHOLD`, `LED_PIN`, `BUZZER_PIN`, `ALERT_DURATION`, and `BEEP_PATTERN_FAST` all equal their `HEAD` values. No Arduino/C++ compiler command was available, so no firmware compilation was performed.
+- Hardware validation required/completed: Required and not yet completed on this modified firmware. Flash `parsing_detailed/parsing_detailed.ino` while retaining `cfg_profiles/iwr6843aop_gun_balanced_32loops_14db.cfg` and the current SPIFFS calibration. With the gun in the captured pose near 3.0 m, verify `Long-range gun evidence` reaches `hits=5/5 confirmed=yes`, `LONG-RANGE GUN SIGNATURE` and `ALERT TRIGGERED` print, GPIO11 goes high, and GPIO12 toggles. Then capture gun-present trials at 2.7, 3.0, 3.3, and 3.5 m plus empty scene, non-metal negatives, and difficult metal negatives such as a phone, tool, keys, plate, and metal box.
+- Rollback procedure: Remove the twelve `LONG_RANGE_GUN_*` constants, the seven per-track state fields and their initializers, `evaluateLongRangeGunSignature()`, its `loop()` call, the `longRangeGunConfirmed` alert/telemetry branches, the alert test/spec/plan, and affected current-state documentation. Preserve the adaptive clustering firmware and append a superseding rollback ledger entry rather than deleting this entry.
+- Related commit: Not committed
+- Follow-up work: Compile and flash immediately, save the resulting serial output, confirm physical LED/buzzer operation, then use negative captures to tighten candidate distance, power, geometry, and temporal gates before treating the behavior as deployable gun detection.
+
+### 2026-07-13 - Expand long-range geometry maxima after same-distance alert failure
+
+- Status: Implemented and source/latest-capture replay verified; Arduino compilation, flashing, physical alert validation, and negative-case testing pending
+- Requested by: User, after flashing the first long-range signature and saving a same-distance gun-present capture where no alert triggered
+- Objective: Allow the newly observed DBSCAN footprint of the same approximately 3 m gun scenario to reach the existing five-frame alert without relaxing any non-geometry evidence gate
+- Files changed: user-updated `output.md`; `parsing_detailed/parsing_detailed.ino`; `tests/test_long_range_alert_policy.py`; `docs/superpowers/specs/2026-07-13-long-range-alert-signature-design.md`; new `docs/superpowers/plans/2026-07-13-expand-long-range-geometry.md`; `PROJECT_RECORD.md`
+- Symbols/settings changed: `LONG_RANGE_GUN_MAX_LENGTH` from `0.30` to `0.55`; `LONG_RANGE_GUN_MAX_WIDTH` from `0.16` to `0.55`; `capture_rows()` now selects any displayed block whose nearest candidate is `gun` instead of hard-coding track ID 99; `test_signature_constants_cover_the_captured_scenario`; renamed latest-capture replay test; Project file roles; Calibration matching and alerting; Range-profile evidence; Current Detection Rules; Known Limitations; Rule-Based Detection Direction; Change Ledger
+- Previous behavior: The long-range path required length 0.18-0.30 m and width 0.07-0.16 m. In the latest stable track-1144 sequence, candidate `gun`, candidate distance, range, relative power, raw SNR, quality, and point count passed in all 64 frames, but length 0.4294-0.4889 m failed in all 64 and width 0.1002-0.4735 m failed in 61. `pass=no`, `hits=0/5`, and `confirmed=no` therefore remained constant and no alert occurred.
+- New behavior: The minimum length and width remain 0.18 m and 0.07 m, while both maxima are 0.55 m. The latest 64-frame gun-candidate sequence passes the complete rule under these bounds. Candidate limit 0.55, range 2.70-3.60 m, power floor 75.0 relative dB, raw SNR floor 100, quality floor 80%, point minimum 5, five-hit confirmation, GPIO assignments, and alert timing are unchanged.
+- Detailed implementation: Generalized the capture replay away from transient tracker IDs, changed its expected and simulated length/width maxima to 0.55 m, observed the exact two constant failures, then changed only the two firmware constants. Updated the approved design with cross-capture geometry evidence and added/completed the implementation plan. No radar command, parser, clustering, tracker association, calibration database, power conversion, or alert-manager code changed.
+- Reason and evidence: Compared the previous committed capture with the latest working `output.md`. The prior gun footprint was 0.2197-0.2500 m long and 0.1026-0.1077 m wide; the latest is 0.4294-0.4889 m long and 0.1002-0.4735 m wide. Latest range, power, SNR, candidate identity/distance, quality, point count, and 64-frame stability all satisfy the existing signature. The root cause is therefore the narrow horizontal geometry maxima, not a power, calibration, temporal, clustering, UART, or alert-manager failure.
+- System impact: A latest-capture-equivalent track can accumulate five consecutive hits and enter the already-wired LED/buzzer path. The broader horizontal footprint increases detection tolerance but also increases the set of large metal or clutter-merged `gun` candidates that can pass, so negative-object validation becomes more urgent. Memory, computation, UART bandwidth, and radar behavior are unchanged.
+- Risks and trade-offs: A 0.55 m maximum is a capture-backed tolerance rather than a physical gun-size claim. DBSCAN can merge nearby clutter into the target footprint, and other metal objects can pass candidate/power/geometry gates. Both available tuning captures are positive; no false-positive rate can be claimed. The alert still requires five uninterrupted qualifying parsed radar frames, which may miss unstable targets.
+- Verification performed: Parsed every latest displayed object block and evaluated each rule gate; compared latest telemetry with `git show HEAD:output.md`; updated the test before firmware; ran `$env:PYTHONDONTWRITEBYTECODE='1'; python -m unittest tests.test_long_range_alert_policy -v` for the red phase; changed the two constants; ran `$env:PYTHONDONTWRITEBYTECODE='1'; python -m unittest tests.test_long_range_clustering_policy tests.test_long_range_alert_policy -v`; ran `git diff --check`; asserted exact values for all twelve long-range gates plus LED, buzzer, alert duration, and beep interval; counted sketch braces.
+- Verification results: Root-cause analysis found 64/64 passes for candidate `gun`, distance at most 0.55, 2.70-3.60 m range, power at least 75, raw mean SNR at least 100, quality at least 80, and points at least 5; length passed 0/64 and width passed 3/64 under the old gates. The red test exited 1 with exactly two failures: firmware length maximum 0.30 versus expected 0.55 and width maximum 0.16 versus expected 0.55. The initial green run passed ten tests in 0.027 seconds. The final complete verifier passed ten tests in 0.024 seconds with `testExit=0`, `diffExit=0`, zero constant assertion failures, brace counts 268/268, zero unchecked plan steps, and exactly one corrective ledger entry; `git diff --check` emitted only line-ending warnings. No Arduino compiler is available in the current shell, so no compilation was performed.
+- Hardware validation required/completed: The latest capture validates the old firmware's failure mode but not the new binary. Recompile and flash `parsing_detailed/parsing_detailed.ino`, retain the current balanced profile and SPIFFS calibration, place the gun in the same approximately 3 m pose, and verify evidence counts 1/5 through 5/5 followed by `LONG-RANGE GUN SIGNATURE`, `ALERT TRIGGERED`, GPIO11 high, and GPIO12 toggling. Then repeat with empty scene, phone, tools, keys, plate, and metal box at similar range.
+- Rollback procedure: Restore only `LONG_RANGE_GUN_MAX_LENGTH=0.30` and `LONG_RANGE_GUN_MAX_WIDTH=0.16`, restore the test expectations and historical track-99-only replay if required, update current-state documentation, and append a superseding rollback ledger entry. Do not alter the earlier historical entries.
+- Related commit: Not committed
+- Follow-up work: Flash and capture the corrected alert run immediately; if it triggers, begin same-range metal-negative testing before any further sensitivity expansion.

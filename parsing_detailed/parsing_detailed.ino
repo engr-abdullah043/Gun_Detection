@@ -137,6 +137,22 @@ const int MIN_DESCRIPTORS_FOR_ROBUST = 5;
 const int PRESENCE_HOLD_FRAMES = 10;
 const int MIN_HITS_FOR_CONFIRMED = 8;
 
+// Scenario-specific long-range gun signature. These gates are derived from
+// the labeled gun-present capture near 3.0 m and intentionally do not loosen
+// the general calibration matcher for every object and distance.
+const float LONG_RANGE_GUN_MIN_RANGE = 2.70;
+const float LONG_RANGE_GUN_MAX_RANGE = 3.60;
+const float LONG_RANGE_GUN_MIN_POWER_DB = 75.0;
+const float LONG_RANGE_GUN_MAX_CANDIDATE_DISTANCE = 0.55;
+const float LONG_RANGE_GUN_MIN_LENGTH = 0.18;
+const float LONG_RANGE_GUN_MAX_LENGTH = 0.55;
+const float LONG_RANGE_GUN_MIN_WIDTH = 0.07;
+const float LONG_RANGE_GUN_MAX_WIDTH = 0.55;
+const float LONG_RANGE_GUN_MIN_MEAN_SNR = 100.0;
+const float LONG_RANGE_GUN_MIN_QUALITY = 80.0;
+const int LONG_RANGE_GUN_MIN_POINTS = 5;
+const int LONG_RANGE_GUN_REQUIRED_HITS = 5;
+
 // =========================================================
 // Data Structures
 // =========================================================
@@ -724,6 +740,16 @@ struct TrackedObject {
   float candidateDistance;
   float lastMatchDistance;
   int framesSinceLastMatch;
+
+  // Scenario-specific long-range evidence is kept per track so isolated
+  // frames cannot activate the alert.
+  int consecutiveLongRangeGunHits;
+  bool longRangeGunEvidenceThisFrame;
+  bool longRangeGunConfirmed;
+  bool longRangePowerAvailable;
+  float longRangePowerDb;
+  float longRangePowerRange;
+  uint16_t longRangePowerRaw;
   
   // Track state
   enum State {
@@ -837,6 +863,13 @@ public:
         t.candidateDistance = 999999.0f;
         t.lastMatchDistance = 999999.0f;
         t.framesSinceLastMatch = 0;
+        t.consecutiveLongRangeGunHits = 0;
+        t.longRangeGunEvidenceThisFrame = false;
+        t.longRangeGunConfirmed = false;
+        t.longRangePowerAvailable = false;
+        t.longRangePowerDb = 0.0f;
+        t.longRangePowerRange = 0.0f;
+        t.longRangePowerRaw = 0;
         t.state = TrackedObject::DETECTING;
         t.consecutiveValidDetections = descriptors[i].isValid ? 1 : 0;
         t.consecutiveHighQuality = (descriptors[i].confidenceScore > 70) ? 1 : 0;
@@ -1289,6 +1322,11 @@ public:
   }
 };
 
+// Explicit prototype keeps the Arduino sketch preprocessor from placing a
+// prototype before the custom tracker and parser types are declared.
+void evaluateLongRangeGunSignature(TrackedObject& track,
+                                   const ParserDiagnostics& diagnostics);
+
 bool findRangeProfilePeakNear(const ParserDiagnostics& diagnostics,
                               float targetRangeMeters,
                               float& peakRangeMeters,
@@ -1315,6 +1353,56 @@ bool findRangeProfilePeakNear(const ParserDiagnostics& diagnostics,
   relativePowerDb = rawValue * RANGE_PROFILE_RAW_TO_DB
                   + RANGE_PROFILE_FFT_COMPENSATION_DB;
   return true;
+}
+
+void evaluateLongRangeGunSignature(TrackedObject& track,
+                                   const ParserDiagnostics& diagnostics) {
+  track.longRangeGunEvidenceThisFrame = false;
+  track.longRangePowerAvailable = false;
+  track.longRangePowerDb = 0.0f;
+  track.longRangePowerRange = 0.0f;
+  track.longRangePowerRaw = 0;
+
+  if (!track.active || !track.measuredThisFrame ||
+      track.allDescriptors.empty()) {
+    track.consecutiveLongRangeGunHits = 0;
+    track.longRangeGunConfirmed = false;
+    return;
+  }
+
+  const AdvancedShapeDescriptor& desc = track.allDescriptors.back();
+  const float rangeMeters = track.position.norm();
+  track.longRangePowerAvailable = findRangeProfilePeakNear(
+    diagnostics, rangeMeters, track.longRangePowerRange,
+    track.longRangePowerDb, track.longRangePowerRaw);
+
+  const bool candidateIsGun = track.candidateName.equalsIgnoreCase("gun");
+  const bool passes =
+    desc.isValid &&
+    candidateIsGun &&
+    track.candidateDistance <= LONG_RANGE_GUN_MAX_CANDIDATE_DISTANCE &&
+    rangeMeters >= LONG_RANGE_GUN_MIN_RANGE &&
+    rangeMeters <= LONG_RANGE_GUN_MAX_RANGE &&
+    track.longRangePowerAvailable &&
+    track.longRangePowerDb >= LONG_RANGE_GUN_MIN_POWER_DB &&
+    desc.length >= LONG_RANGE_GUN_MIN_LENGTH &&
+    desc.length <= LONG_RANGE_GUN_MAX_LENGTH &&
+    desc.width >= LONG_RANGE_GUN_MIN_WIDTH &&
+    desc.width <= LONG_RANGE_GUN_MAX_WIDTH &&
+    desc.meanSnr >= LONG_RANGE_GUN_MIN_MEAN_SNR &&
+    desc.confidenceScore >= LONG_RANGE_GUN_MIN_QUALITY &&
+    desc.numPoints >= LONG_RANGE_GUN_MIN_POINTS;
+
+  track.longRangeGunEvidenceThisFrame = passes;
+  if (passes) {
+    track.consecutiveLongRangeGunHits = min(
+      track.consecutiveLongRangeGunHits + 1,
+      LONG_RANGE_GUN_REQUIRED_HITS);
+  } else {
+    track.consecutiveLongRangeGunHits = 0;
+  }
+  track.longRangeGunConfirmed =
+    track.consecutiveLongRangeGunHits >= LONG_RANGE_GUN_REQUIRED_HITS;
 }
 
 // =========================================================
@@ -1591,6 +1679,20 @@ CalibrationDatabase* calibDB = nullptr;
 ObjectTracker* tracker = nullptr;
 AlertManager* alertManager = nullptr;
 
+void resetAllLongRangeGunEvidence() {
+  if (tracker == nullptr) return;
+  for (auto& track : tracker->getTracks()) {
+    if (!track.active) continue;
+    track.consecutiveLongRangeGunHits = 0;
+    track.longRangeGunEvidenceThisFrame = false;
+    track.longRangeGunConfirmed = false;
+    track.longRangePowerAvailable = false;
+    track.longRangePowerDb = 0.0f;
+    track.longRangePowerRange = 0.0f;
+    track.longRangePowerRaw = 0;
+  }
+}
+
 void setup() {
   Serial.begin(SERIAL_MONITOR_BAUD);
   delay(1000);
@@ -1707,6 +1809,7 @@ void loop() {
   const size_t rawPointCount = points.size();
 
   if (points.empty()) {
+    resetAllLongRangeGunEvidence();
     Serial.printf("Radar frame %lu: no points | packet=%luB objects=%lu TLVs=%lu pointsTLV=%s sideInfo=%s malformed=%s\n",
                   (unsigned long)parserInfo.frameNumber,
                   (unsigned long)parserInfo.packetLength,
@@ -1722,6 +1825,7 @@ void loop() {
   const FilterDiagnostics filterInfo = filterPoints(points);
   const size_t filteredPointCount = points.size();
   if (points.empty()) {
+    resetAllLongRangeGunEvidence();
     Serial.printf("Radar frame %lu: %u raw, 0 accepted | range=%u unknownSNR=%u lowSNR=%u inputRange=%.2f-%.2fm | sideInfo=%s malformed=%s TLVs=[",
                   (unsigned long)parserInfo.frameNumber,
                   (unsigned)filterInfo.inputCount,
@@ -1745,6 +1849,7 @@ void loop() {
   DbscanDiagnostics dbscanInfo;
   clusterDBSCAN(points, clusters, dbscanInfo);
   if (clusters.empty()) {
+    resetAllLongRangeGunEvidence();
     Serial.printf("Radar frame %lu: %u filtered points, no DBSCAN cluster | acceptedRange=%.2f-%.2fm epsRange=%.2f-%.2fm minPts=%d total maxNeighbors=%u coreCandidates=%u\n",
                   (unsigned long)parserInfo.frameNumber,
                   (unsigned)filteredPointCount,
@@ -1769,6 +1874,7 @@ void loop() {
   }
   
   if (validClusters.empty()) {
+    resetAllLongRangeGunEvidence();
     Serial.printf("Radar frame %lu: %u clusters, none produced a valid descriptor\n",
                   (unsigned long)parserInfo.frameNumber, (unsigned)clusters.size());
     delay(10);
@@ -1782,6 +1888,7 @@ void loop() {
   for (auto& tr : tracks) {
     if (tr.active) {
       tracker->updateMatchWithHysteresis(tr, calibDB);
+      evaluateLongRangeGunSignature(tr, parserInfo);
     }
   }
 
@@ -1797,6 +1904,9 @@ void loop() {
       
       if (tr.matchedName.equalsIgnoreCase("gun") &&
           tr.state == TrackedObject::CONFIRMED) {
+        gunDetected = true;
+      }
+      if (tr.longRangeGunConfirmed) {
         gunDetected = true;
       }
     }
@@ -1873,12 +1983,18 @@ void loop() {
 
     Serial.printf("\n  %s [%s][%s] Object ID: %d", stateIcon, objIcon, matIcon, track.id);
     
-    if (track.matchedName.equalsIgnoreCase("gun")) {
+    if ((track.matchedName.equalsIgnoreCase("gun") &&
+         track.state == TrackedObject::CONFIRMED) ||
+        track.longRangeGunConfirmed) {
       Serial.print(" 🔴 GUN DETECTED!");
     }
     Serial.println();
 
-    if (track.matchedName.length() > 0) {
+    if (track.longRangeGunConfirmed) {
+      Serial.printf("     🚨 LONG-RANGE GUN SIGNATURE (%d/%d hits)\n",
+                    track.consecutiveLongRangeGunHits,
+                    LONG_RANGE_GUN_REQUIRED_HITS);
+    } else if (track.matchedName.length() > 0) {
       if (track.state == TrackedObject::TEMP_LOST) {
         Serial.printf("     ⏸️  IDENTIFIED (HELD): '%s' [%d/%d frames]\n", 
                      track.matchedName.c_str(), 
@@ -1928,6 +2044,20 @@ void loop() {
     Serial.printf("     Best calibration candidate: %s | distance=%.4f | threshold=%.2f\n",
                   track.candidateName.length() ? track.candidateName.c_str() : "none",
                   track.candidateDistance, SHAPE_DESCRIPTOR_TOLERANCE);
+    Serial.printf("     Long-range gun evidence: pass=%s hits=%d/%d confirmed=%s | power=%s",
+                  track.longRangeGunEvidenceThisFrame ? "yes" : "no",
+                  track.consecutiveLongRangeGunHits,
+                  LONG_RANGE_GUN_REQUIRED_HITS,
+                  track.longRangeGunConfirmed ? "yes" : "no",
+                  track.longRangePowerAvailable ? "available" : "missing");
+    if (track.longRangePowerAvailable) {
+      Serial.printf(" %.2fdB@%.4fm raw=%u",
+                    track.longRangePowerDb,
+                    track.longRangePowerRange,
+                    (unsigned)track.longRangePowerRaw);
+    }
+    Serial.printf(" | candidateLimit=%.2f\n",
+                  LONG_RANGE_GUN_MAX_CANDIDATE_DISTANCE);
   }
 
   // readPacket() already waits for the next radar frame. Do not sleep here:
