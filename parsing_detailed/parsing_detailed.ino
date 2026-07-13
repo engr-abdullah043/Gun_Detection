@@ -137,18 +137,23 @@ const int MIN_DESCRIPTORS_FOR_ROBUST = 5;
 const int PRESENCE_HOLD_FRAMES = 10;
 const int MIN_HITS_FOR_CONFIRMED = 8;
 
-// Scenario-specific long-range gun signature. These gates are derived from
-// the labeled gun-present capture near 3.0 m and intentionally do not loosen
-// the general calibration matcher for every object and distance.
-const float LONG_RANGE_GUN_MIN_RANGE = 2.70;
-const float LONG_RANGE_GUN_MAX_RANGE = 3.60;
-const float LONG_RANGE_GUN_MIN_POWER_DB = 75.0;
+// Scenario-specific gun signature. These gates are derived from five labeled
+// captures: open at 3.0 m, under cloth at 3.0 m, hand bag at 2.5 m, concealed
+// bag at 2.5 m, and carried by a person at 2.6 m. The static boundary clutter
+// at 3.486-3.49 m (5-6 points, SNR peak <= 118, z ~ -0.6 m) must stay below
+// every SNR/width/range/z gate.
+const float LONG_RANGE_GUN_MIN_RANGE = 2.30;
+const float LONG_RANGE_GUN_MAX_RANGE = 3.45;
+const float LONG_RANGE_GUN_MIN_POWER_DB = 65.0;
 const float LONG_RANGE_GUN_MAX_CANDIDATE_DISTANCE = 0.55;
-const float LONG_RANGE_GUN_MIN_LENGTH = 0.18;
-const float LONG_RANGE_GUN_MAX_LENGTH = 0.55;
-const float LONG_RANGE_GUN_MIN_WIDTH = 0.07;
+const float LONG_RANGE_GUN_MIN_LENGTH = 0.15;
+const float LONG_RANGE_GUN_MAX_LENGTH = 0.80;
+const float LONG_RANGE_GUN_MIN_WIDTH = 0.10;
 const float LONG_RANGE_GUN_MAX_WIDTH = 0.55;
-const float LONG_RANGE_GUN_MIN_MEAN_SNR = 100.0;
+const float LONG_RANGE_GUN_MIN_MEAN_SNR = 118.0;
+const float LONG_RANGE_GUN_MIN_PEAK_SNR = 140.0;
+const float LONG_RANGE_GUN_MAX_ABS_VELOCITY = 0.35;
+const float LONG_RANGE_GUN_MAX_ABS_Z = 0.50;
 const float LONG_RANGE_GUN_MIN_QUALITY = 80.0;
 const int LONG_RANGE_GUN_MIN_POINTS = 5;
 const int LONG_RANGE_GUN_REQUIRED_HITS = 5;
@@ -1390,6 +1395,9 @@ void evaluateLongRangeGunSignature(TrackedObject& track,
     desc.width >= LONG_RANGE_GUN_MIN_WIDTH &&
     desc.width <= LONG_RANGE_GUN_MAX_WIDTH &&
     desc.meanSnr >= LONG_RANGE_GUN_MIN_MEAN_SNR &&
+    desc.maxSnr >= LONG_RANGE_GUN_MIN_PEAK_SNR &&
+    desc.maxAbsRadialVelocity <= LONG_RANGE_GUN_MAX_ABS_VELOCITY &&
+    fabs(track.position.z) <= LONG_RANGE_GUN_MAX_ABS_Z &&
     desc.confidenceScore >= LONG_RANGE_GUN_MIN_QUALITY &&
     desc.numPoints >= LONG_RANGE_GUN_MIN_POINTS;
 
