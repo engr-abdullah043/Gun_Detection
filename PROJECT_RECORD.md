@@ -21,12 +21,12 @@ Historical ledger entries are append-only. If an earlier entry is incomplete or 
 
 - Baseline date: 2026-07-13
 - Branch: `main`
-- Baseline commit: `82035de1e2cc73c6a5ddf83b369fc442de0b405b`
+- Baseline commit: `fef5494` (`prepared .md files`)
 - Remote state at reconstruction time: `main...origin/main`
 - Working tree before this documentation change: clean
 - Canonical detection firmware: `parsing_detailed/parsing_detailed.ino`
 - Firmware build or hardware test performed during reconstruction: no; the reconstruction was read-only
-- Latest baseline commit purpose: bound tracker storage and erase retired tracks to prevent ESP32 crashes caused by accumulated descriptor deques
+- Latest baseline commit purpose: commit the permanent project record, repository instructions, reconstruction plan, and current runtime capture after the tracker-storage crash fix
 
 There is no build manifest or README that formally declares the canonical sketch. `parsing_detailed/parsing_detailed.ino` is treated as canonical because it contains the latest firmware evolution and its print statements match the committed `output.md` telemetry and the user-provided live sample.
 
@@ -43,11 +43,11 @@ There is no build manifest or README that formally declares the canonical sketch
 | `json/json.ino` | Separate provisioning sketch that overwrites `/radar_calibration.json` in ESP32 SPIFFS with embedded JSON and reads it back. |
 | `json/radar_calibration.json` | Checked-in aggregate calibration data containing `GUN`, `BOX`, and lowercase `gun` profiles. The running detector reads the SPIFFS copy, which can differ from this repository file. |
 | `cfg_profiles/iwr6843aop_gun_baseline_16loops_16db.cfg` | Controlled baseline radar profile: 16 loops, 16 dB range CFAR, 15 dB Doppler CFAR. |
-| `cfg_profiles/iwr6843aop_gun_balanced_32loops_14db.cfg` | Profile assumed by the current range-profile conversion: 32 loops, 14 dB range and Doppler CFAR. |
+| `cfg_profiles/iwr6843aop_gun_balanced_32loops_14db.cfg` | Fixed profile for the current detection phase: 32 loops, 14 dB range and Doppler CFAR, 0.30-3.50 m range FOV, and +/-45 degree azimuth/elevation FOV. The current relative-power conversion assumes this profile. |
 | `cfg_profiles/iwr6843aop_gun_high_sensitivity_64loops_12db.cfg` | Higher-sensitivity profile: 64 loops, 12 dB range and Doppler CFAR. |
 | `oprimized_config.cfg` | Older experimental profile using 48 loops, 50 ms frames, clutter removal, wider angular FOV, and a 0.10–2.00 m range FOV. |
 | `xwr68xx_AOP_profile_2026_01_29T17_01_51_013.cfg` | Earlier Visualizer-generated 16-loop profile. |
-| `output.md` | Committed runtime capture used as evidence for parser, telemetry, tracker, and candidate behavior. It is not a labeled validation dataset. |
+| `output.md` | Current user-saved long-range gun-present diagnostic capture. It contains pre-classifier rejection evidence for radar frames 4134-4220 but no accepted object descriptor or firmware range-profile reading. It is not a complete labeled validation dataset. |
 | `fixes_plan.md` | Earlier repair plan. Some items were implemented and some were not. It is not the source of truth for current behavior. |
 | `detection_fix_plan.md` | Later tuning/repair proposal. Several recommendations were superseded or remain unimplemented. |
 | `docs/superpowers/specs/2026-07-11-relaxed-point-thresholds-design.md` | Approved design that retained `DBSCAN_EPS=0.15 m` and aligned four point-count gates at six. |
@@ -209,6 +209,12 @@ bin 53 -> 53 * 0.0381529018 = 2.0221 m
 This is relative power, not dBm, calibrated RCS, or uniquely cluster-associated energy. Objects at similar ranges can use the same range-profile peak. The conversion is hard-coded for the balanced 128-range-bin/32-Doppler-bin profile and must be revisited if the active radar profile changes.
 
 Range-profile power is currently display-only. It does not participate in filtering, validity, quality, calibration distance, identity confirmation, or alerting.
+
+On 2026-07-13, the user reported that the updated balanced profile detected the gun at approximately 1.1 m with approximately 98 relative dB in the mmWave Demo Visualizer. This is a user-reported hardware observation, not an independently verified measurement or a committed labeled capture. It must not be treated as a final gun threshold: range, orientation, clutter, competing objects, and the global range-profile ambiguity can all change the value.
+
+Later on 2026-07-13, the user changed the target deployment distance to 3.5 m and reported mmWave Demo Visualizer observations of approximately 80.21 relative dB at approximately 3.3 m and 77.54 relative dB at approximately 3.2 m. The subsequently saved `output.md` confirms the firmware-side failure but cannot confirm those power values: every target-like point set is rejected before a track exists, and the firmware prints range-profile power only for displayed tracks. The power values therefore remain user-reported Visualizer observations.
+
+The saved long-range capture contains 82 diagnostic radar-frame records from sensor frame 4134 through 4220, with frames 4192-4196 absent. In 74 records, all 651 parsed points were rejected by the range filter (`rangeRejected=651`, `unknownSNR=0`, `lowSNR=0`). The remaining eight records reached DBSCAN with 20 total filtered points distributed as one to six points per frame; none formed a cluster. No object descriptor, calibration candidate, relative-power line, gun identity, LED alert, or buzzer alert was produced.
 
 ### Velocity
 
@@ -443,12 +449,14 @@ loops:            32
 frame period:     100 ms
 range CFAR:       14 dB configuration value
 Doppler CFAR:     14 dB configuration value
-range FOV:        0.30 to 2.50 m
+range FOV:        0.30 to 3.50 m
 azimuth FOV:      -45 to +45 degrees
-elevation FOV:    -25 to +25 degrees
+elevation FOV:    -45 to +45 degrees
 clutter removal:  disabled
 GUI outputs:      detected points, range profile, side information/statistics
 ```
+
+The 0.30-3.50 m range supersedes the earlier 0.30-1.50 m decision and is the fixed testing, calibration, and deployment envelope for the current project phase. The radar CFAR range FOV now allows 3.50 m, but the ESP32 point filter still declares `RANGE_MAX=3.00 m`. Consequently, firmware currently rejects all parsed points beyond 3.00 m before clustering, regardless of radar detection or range-profile power.
 
 Switching to the 16-, 48-, or 64-loop profiles changes Doppler processing, sensitivity, point-cloud density, and relative-power compensation. Any rule thresholds derived under one profile must record the exact profile and must not be assumed transferable.
 
@@ -496,6 +504,8 @@ Relative power, SNR, geometry, shape, velocity, and temporal stability can contr
 
 Future rules should explicitly handle missing shape features, normalize or stratify range-dependent power, aggregate evidence over time, and measure false positives as well as detection rate.
 
+For the current phase, all labeled captures, power bands, calibration profiles, acceptance tests, and deployment claims must cover 0.30-3.50 m using `cfg_profiles/iwr6843aop_gun_balanced_32loops_14db.cfg`. Relative power will be supporting metal evidence rather than sufficient proof of a gun, because other metal objects can also produce strong returns. Long-range rules must explicitly handle five-to-six-point returns and the lack of shape features that are forced to zero below ten points.
+
 ## Git History Reconstruction
 
 All baseline commits were made on 2026-07-11 in a linear history.
@@ -516,6 +526,7 @@ All baseline commits were made on 2026-07-11 in a linear history.
 | `b016668` | Documented the approved relaxed-point design: retain 0.15 m radius and align point gates at six. |
 | `0f33728` | Implemented the four six-point thresholds without changing matching or temporal thresholds. |
 | `82035de` | Bounded tracker count at 32 and erased retired tracks to avoid memory-growth crashes. |
+| `fef5494` | Added the permanent project record and enforcement instructions, the reconstruction plan, and the updated runtime capture. |
 
 ### Earlier plans versus current code
 
@@ -574,3 +585,63 @@ Copy this template for every repository change. Replace every field with concret
 - Rollback procedure: Remove `PROJECT_RECORD.md`, `AGENTS.md`, and `docs/superpowers/plans/2026-07-13-project-record.md`. This is not recommended because it would remove the restored project context and maintenance policy.
 - Related commit: Not committed
 - Follow-up work: Use this ledger for every subsequent edit; establish a labeled capture protocol before selecting final gun-detection rules
+
+### 2026-07-13 - Fix the current operating envelope at 0.30-1.50 metres
+
+- Status: Implemented; hardware threshold validation pending
+- Requested by: User, following mmWave Demo Visualizer configuration and a gun-present observation at approximately 1.1 m
+- Objective: Make the balanced 32-loop profile the fixed configuration for current testing, calibration, and deployment, with a 0.30-1.50 m operating envelope
+- Files changed: `cfg_profiles/iwr6843aop_gun_balanced_32loops_14db.cfg`; `PROJECT_RECORD.md`
+- Symbols/settings changed: `aoaFovCfg -1 -45 45 -45 45`; `cfarFovCfg -1 0 0.30 1.50`; balanced-profile header comment; Current Verified Baseline; Project file roles; Range-profile relative power; Radar Configuration Baseline; Rule-Based Detection Direction; Git History Reconstruction; Change Ledger
+- Previous behavior: The committed balanced profile used a 0.30-2.50 m range FOV and +/-25 degree elevation FOV. Its header described that older envelope. The project record also described 0.30-2.50 m and did not define a fixed calibration/deployment range for this phase.
+- New behavior: The balanced profile limits range detections to 0.30-1.50 m and uses +/-45 degree azimuth and elevation FOV. The record defines that exact profile and envelope as mandatory for current captures, calibration, tuning, validation, and deployment. Future distance extension is deferred to a separate validation cycle.
+- Detailed implementation: Preserved the user's radar-command edits, corrected the profile header so it matches the active commands, updated the documented baseline configuration, recorded the phase-specific range decision, and documented the user's approximately 1.1 m / approximately 98 relative-dB gun observation with an explicit unverified-evidence qualifier. The record also notes that firmware `RANGE_MAX` remains 3.00 m until the planned detector implementation aligns it.
+- Reason and evidence: Relative range-profile power, point density, and SNR depend on radar configuration and range. Locking one profile and one operating envelope is necessary before deriving empirical rule thresholds. The user confirmed that this balanced profile produced the current successful Visualizer observation.
+- System impact: Changes radar angular/range acceptance when this `.cfg` is loaded and narrows the scope of calibration and deployment claims. No ESP32 parsing, classification, temporal confirmation, LED, or buzzer logic changed. Documentation now matches the selected radar commands.
+- Risks and trade-offs: Targets beyond 1.50 m are intentionally excluded for this phase. The wider elevation FOV can admit more off-axis clutter. A strong relative-power return is not unique to a gun, and the reported approximately 98 value cannot be used as a standalone threshold without labeled negative captures and range-band normalization.
+- Verification performed: Inspected `git diff` for the balanced profile; read the complete active `.cfg`; checked the documented profile values against `profileCfg`, `frameCfg`, both `cfarCfg` commands, `clutterRemoval`, `aoaFovCfg`, and both `cfarFovCfg` commands; ran `git diff --check` after the documentation update.
+- Verification results: Static inspection confirms 32 loops, 100 ms frames, 14 dB range/Doppler CFAR settings, clutter removal disabled, 0.30-1.50 m range FOV, and +/-45 degree azimuth/elevation FOV. No firmware compile, flash, fresh serial capture, or controlled false-positive test was performed by Codex for this documentation/configuration update.
+- Hardware validation required/completed: User-reported observation only: a gun was detected by the mmWave Demo Visualizer at approximately 1.1 m with approximately 98 relative dB. Required follow-up is a saved, labeled capture set across 0.30-1.50 m for gun, empty-scene, non-metal, and difficult metal-negative cases.
+- Rollback procedure: Restore `aoaFovCfg -1 -45 45 -25 25` and `cfarFovCfg -1 0 0.30 2.50` in the balanced profile, restore its previous header, and append a superseding ledger entry that removes the phase-specific 1.50 m constraint.
+- Related commit: Not committed
+- Follow-up work: Complete and approve the hybrid geometry/shape, range-normalized power, and temporal-confirmation design; then align firmware range filtering and implement diagnostic capture support before choosing final thresholds
+
+### 2026-07-13 - Supersede the operating envelope with a 3.50-metre deployment target
+
+- Status: Configuration and record updated; firmware implementation and controlled hardware validation pending
+- Requested by: User, based on a changed deployment goal and long-range mmWave Demo Visualizer observations
+- Objective: Extend the fixed testing, calibration, and deployment envelope from 0.30-1.50 m to 0.30-3.50 m and preserve the evidence and known firmware blockers before detector tuning
+- Files changed: `cfg_profiles/iwr6843aop_gun_balanced_32loops_14db.cfg`; `PROJECT_RECORD.md`; the user reported a new `output.md` capture, but the saved file remained unchanged during inspection and was not edited by Codex
+- Symbols/settings changed: `cfarFovCfg -1 0 0.30 3.50`; balanced-profile header comment; Project file roles; Range-profile relative power; Radar Configuration Baseline; Rule-Based Detection Direction; Change Ledger
+- Previous behavior: The immediately preceding phase decision limited the balanced profile and all calibration/deployment claims to 0.30-1.50 m. Firmware `RANGE_MAX=3.00 m`, and DBSCAN's configured six-neighbor rule effectively required seven total points.
+- New behavior: The balanced radar profile allows range detections from 0.30 m through 3.50 m, and the record defines 3.50 m as the current deployment target. Firmware remains unchanged and therefore still cannot process targets beyond 3.00 m or form a DBSCAN cluster from only five or six total points.
+- Detailed implementation: Preserved the user's change from `cfarFovCfg -1 0 0.30 1.50` to `cfarFovCfg -1 0 0.30 3.50`, corrected the profile header, superseded current-state documentation that declared the 1.50 m envelope, and recorded the reported long-range power values with explicit provenance. Source inspection identified two independent pre-classifier blockers: range filtering at 3.00 m and DBSCAN's exclusion of the seed point when enforcing `DBSCAN_MIN_POINTS=6`.
+- Reason and evidence: The deployment goal now requires LED and buzzer activation for a gun through 3.50 m. The user reported approximately 80.21 relative dB at approximately 3.3 m and 77.54 relative dB at approximately 3.2 m with only approximately five to six detected points. Static firmware inspection confirmed `RANGE_MAX=3.0`, `DBSCAN_MIN_POINTS=6`, seed exclusion in both neighborhood loops, and `MIN_CLUSTER_POINTS`, `MIN_POINTS_FOR_OUTPUT`, and `MIN_POINTS_FOR_VALID_OBJECT` all equal to six.
+- System impact: Loading the updated `.cfg` permits the radar to report detections out to 3.50 m. No ESP32 parser, range filter, clusterer, descriptor, matching, alert, LED, or buzzer behavior changed, so the configuration change alone cannot satisfy the new deployment goal.
+- Risks and trade-offs: Extending range and accepting sparse clusters will increase clutter and false-cluster exposure. Five-point clusters cannot provide the current thickness/planarity features, which are forced to zero below ten points, and are poorly matched to close-range calibration profiles. Relative power also falls with range and is not unique to guns, so a fixed 77.54 or 80.21 threshold would be unsafe without negative-object captures and local-background or range-band normalization.
+- Verification performed: Read `PROJECT_RECORD.md`; ran `git status --short --branch`; inspected the balanced-profile diff and complete current file; inspected saved `output.md` metadata, tail, long-range-value searches, and diagnostic counts; inspected firmware constants and source for range filtering, DBSCAN neighborhood semantics, minimum cluster/output/validity gates, and range-profile lookup.
+- Verification results: The radar profile contains `cfarFovCfg -1 0 0.30 3.50`. Firmware source still contains `RANGE_MAX=3.0`; a point outside that range increments `rangeRejected` and is discarded. DBSCAN omits the seed point and requires six neighbors, so at least seven total nearby points are needed. The saved 165,996-byte `output.md` was last modified at 10:55:48 and contains the earlier approximately 1.0 m capture; it contains no 3.2-3.3 m target record or reported 77.54/80.21 values. An untracked `.output.md.kate-swp` last modified at 12:39:06 was observed but not read or modified.
+- Hardware validation required/completed: User-reported Visualizer observations only. Required next evidence is a saved long-range serial capture showing raw/filtered counts, range rejections, DBSCAN failures, range-profile power, SNR, and point geometry at multiple distances through 3.50 m, followed by gun-absent and metal-negative captures under the same profile.
+- Rollback procedure: Restore `cfarFovCfg -1 0 0.30 1.50` and the 1.50 m profile header, then append a new superseding ledger entry that reinstates the earlier deployment envelope. Do not rewrite either historical range-decision entry.
+- Related commit: Not committed
+- Follow-up work: Save the current editor capture to `output.md`; approve a sparse long-range hybrid detection design; then implement firmware range alignment, corrected DBSCAN minimum-point semantics, range-aware power evidence, temporal confirmation, diagnostics, and controlled false-positive testing
+
+### 2026-07-13 - Ingest the saved 3.2-3.3-metre firmware rejection capture
+
+- Status: Verified diagnostic evidence; no detector fix implemented
+- Requested by: User hardware experiment; the editor saved `output.md` during the investigation
+- Objective: Replace the earlier unsaved-capture assumption with exact firmware evidence and quantify where the long-range gun-present frames are rejected
+- Files changed: `output.md` replaced by the user's saved capture; `PROJECT_RECORD.md` current-state evidence and Change Ledger updated
+- Symbols/settings changed: No firmware symbol or radar command changed; `output.md` evidence; Project file roles; Range-profile relative power; Change Ledger
+- Previous behavior: The repository still held the older approximately 1.0 m output capture when the first long-range inspection ran. The 3.2-3.3 m behavior and reported 77.54/80.21 relative-dB values were available only through the user's description and an active editor swap file.
+- New behavior: `output.md` now contains the saved long-range firmware diagnostics. The record quantifies 74 complete range-rejection records and eight DBSCAN failures and retains the power values as Visualizer-only observations because the firmware never created a track from which it could print TLV-2 power.
+- Detailed implementation: Parsed both diagnostic formats in the saved capture. For `raw, 0 accepted` records, counted frame IDs, raw points, range rejections, unknown-SNR rejections, and low-SNR rejections. For `filtered points, no DBSCAN cluster` records, counted frame IDs and per-frame point totals. Searched for object, candidate, power, identity, and alert output. Updated only documentation around the user-provided capture; did not alter `output.md` contents.
+- Reason and evidence: The saved capture directly identifies the failure stage. Across 74 frames, all 651 raw points were rejected specifically for range, with zero unknown-SNR or low-SNR rejections. Eight other frames supplied 1, 1, 1, 2, 2, 3, 4, or 6 filtered points; the six-point frame still failed because DBSCAN requires six other neighbors, effectively seven total points.
+- System impact: Converts the long-range diagnosis from an inference into saved firmware evidence. No parser, filter, clusterer, classifier, LED, buzzer, timing, memory, calibration, or radar runtime behavior changed.
+- Risks and trade-offs: The capture does not contain raw point coordinates, raw TLV-2 bins, object descriptors, or negative-object cases, so it cannot establish the correct DBSCAN radius, power threshold, false-positive rate, or gun/non-gun separation. Radar frames 4192-4196 are absent, and frame 4191 reports an anomalous fifth TLV type while `malformed=no`; neither issue changes the dominant range-filter diagnosis but both remain diagnostic caveats.
+- Verification performed: Read the complete saved `output.md`; searched all event and diagnostic lines; parsed the two rejection formats with a read-only Python script; counted frame records and per-reason point totals; searched for long-range power, object, match, gun, and alert output; ran `git diff --check` after updating the record.
+- Verification results: The capture has 82 diagnostic records covering radar frames 4134-4220 with five absent frame numbers. Seventy-four records reject 651 of 651 raw points for range. Eight records pass 20 total points to DBSCAN but produce no cluster; the largest contains six points. There are zero displayed object frames and therefore zero firmware relative-power, calibration-candidate, gun-detection, LED-alert, or buzzer-alert lines.
+- Hardware validation required/completed: Hardware capture completed for the current unmodified firmware's failure mode. After implementation, repeat gun-present tests at 0.30, 1.0, 2.0, 3.0, 3.2, 3.3, and 3.5 m and collect empty-scene plus non-metal and difficult metal-negative captures at the same bands.
+- Rollback procedure: Restore the prior committed `output.md` if the project needs the earlier close-range capture as the primary artifact, and append a new ledger entry explaining which capture is authoritative. Revert the current-state capture descriptions without deleting either historical evidence entry.
+- Related commit: Not committed
+- Follow-up work: Approve a design that first aligns the range filter and corrects sparse-cluster semantics, then adds long-range diagnostics and range-aware power evidence before calibrating alert thresholds
