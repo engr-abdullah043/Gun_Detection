@@ -19,14 +19,14 @@ Historical ledger entries are append-only. If an earlier entry is incomplete or 
 
 ### Repository state
 
-- Baseline date: 2026-07-13
+- Baseline date: 2026-07-15
 - Branch: `BEFORE_CONFIG_TWEAKS`
-- Baseline commit: `107c222` (`inc_range_firmwarre`)
+- Baseline commit: `1260415` (`somewhat_satisfactory_results`)
 - Remote state before the current edit: `BEFORE_CONFIG_TWEAKS...origin/BEFORE_CONFIG_TWEAKS`
-- Working tree: contains the current uncommitted long-range alert-signature implementation
+- Working tree before the 2026-07-15 tuning edit: the uncommitted 2026-07-14 operating-policy changes remained present; the firmware also contained user-set `LED_PIN=2` and `BUZZER_PIN=38`; the user supplied new `outputs/only_human_present.md` and `outputs/human_with_gun.md` captures; unrelated `.claude/` and `IWR_Config.md` paths were left untouched
 - Canonical detection firmware: `parsing_detailed/parsing_detailed.ino`
 - Firmware build or hardware test performed during reconstruction: no; the reconstruction was read-only
-- Latest baseline commit purpose: commit the 3.50 m requirement, updated balanced radar profile, long-range rejection capture, and corresponding project-record evidence
+- Latest baseline commit purpose: retain the later five-capture concealed/open gun tuning, 0.08 m width minimum, five-of-seven signature window, continuously refreshed alert, and updated `outputs/gun_present_open.md`; those later firmware commits did not update this record and are reconciled by the 2026-07-14 ledger entry
 
 There is no build manifest or README that formally declares the canonical sketch. `parsing_detailed/parsing_detailed.ino` is treated as canonical because it contains the latest firmware evolution and its print statements match the committed `output.md` telemetry and the user-provided live sample.
 
@@ -43,7 +43,7 @@ There is no build manifest or README that formally declares the canonical sketch
 | `json/json.ino` | Separate provisioning sketch that overwrites `/radar_calibration.json` in ESP32 SPIFFS with embedded JSON and reads it back. |
 | `json/radar_calibration.json` | Checked-in aggregate calibration data containing `GUN`, `BOX`, and lowercase `gun` profiles. The running detector reads the SPIFFS copy, which can differ from this repository file. |
 | `cfg_profiles/iwr6843aop_gun_baseline_16loops_16db.cfg` | Controlled baseline radar profile: 16 loops, 16 dB range CFAR, 15 dB Doppler CFAR. |
-| `cfg_profiles/iwr6843aop_gun_balanced_32loops_14db.cfg` | Fixed profile for the current detection phase: 32 loops, 14 dB range and Doppler CFAR, 0.30-3.50 m range FOV, and +/-45 degree azimuth/elevation FOV. The current relative-power conversion assumes this profile. |
+| `cfg_profiles/iwr6843aop_gun_balanced_32loops_14db.cfg` | Fixed profile for the current detection phase: 32 loops, 14 dB range and Doppler CFAR, 0.50-3.00 m range FOV, and +/-30 degree azimuth/elevation FOV. The current relative-power conversion assumes this profile. |
 | `cfg_profiles/iwr6843aop_gun_high_sensitivity_64loops_12db.cfg` | Higher-sensitivity profile: 64 loops, 12 dB range and Doppler CFAR. |
 | `oprimized_config.cfg` | Older experimental profile using 48 loops, 50 ms frames, clutter removal, wider angular FOV, and a 0.10–2.00 m range FOV. |
 | `xwr68xx_AOP_profile_2026_01_29T17_01_51_013.cfg` | Earlier Visualizer-generated 16-loop profile. |
@@ -58,7 +58,12 @@ There is no build manifest or README that formally declares the canonical sketch
 | `docs/superpowers/specs/2026-07-13-long-range-alert-signature-design.md` | Design and evidence bounds for the scenario-specific 2.70-3.60 m gun signature. |
 | `docs/superpowers/plans/2026-07-13-long-range-alert-signature.md` | Implementation and validation checklist for the long-range alert stage. |
 | `docs/superpowers/plans/2026-07-13-expand-long-range-geometry.md` | Approved and completed red-green plan for expanding only the disproven long-range length/width maxima. |
-| `tests/test_long_range_alert_policy.py` | Capture-replay and source-contract tests for long-range gates, per-track state, temporal confirmation, and alert-path integration. |
+| `tests/test_long_range_alert_policy.py` | Capture-replay and source-contract tests for base long-range gates, per-track base and shape-Doppler histories, human-only rejection, human-with-gun retention, and alert-path integration. |
+| `docs/superpowers/specs/2026-07-14-concealed-gun-operating-envelope-design.md` | Approved design for the next implementation: 0.50-3.00 m deployment FOV, +/-30 degree angular FOV, conservative candidate/motion gates, preserved 80-relative-dB floor, processing margin, and diagnostic-only motion-coherence measurements. |
+| `docs/superpowers/plans/2026-07-14-concealed-gun-operating-envelope.md` | TDD implementation plan for the approved concealed-detection profile, firmware constants, capture replay, diagnostic Doppler coherence, documentation, and verification. |
+| `outputs/only_human_present.md` | User-supplied human-only development capture near 2.0-2.2 m. Its dominant track 1756 demonstrates that the base five-of-seven signature can false-confirm a person-sized cluster. |
+| `outputs/human_with_gun.md` | User-supplied human-with-gun development capture near 2.0-2.2 m. Its dominant track 1756 supplies the positive comparison for the secondary shape-Doppler gate. |
+| `docs/superpowers/plans/2026-07-15-human-gun-shape-doppler-gate.md` | Test-first implementation and verification plan for the two-history human-vs-gun scenario gate. |
 
 ### Hardware and interfaces
 
@@ -71,8 +76,8 @@ There is no build manifest or README that formally declares the canonical sketch
 | Serial monitor | 460800 baud |
 | Radar CLI configurator UART | GPIO18 RX, GPIO17 TX, initially 115200 baud |
 | Start/stop button | GPIO4, input pull-up, active low |
-| Alert LED | GPIO11 |
-| Active buzzer | GPIO12 |
+| Alert LED | GPIO2; pre-existing user working-tree setting observed before the 2026-07-15 detector tuning |
+| Active buzzer | GPIO38; pre-existing user working-tree setting observed before the 2026-07-15 detector tuning |
 | Alert duration | 3000 ms |
 | Buzzer toggle interval | 200 ms |
 | Calibration path used by detector | `/radar_calibration.json` in SPIFFS |
@@ -106,7 +111,7 @@ Points initially receive `SNR_UNKNOWN=0`. If TLV 7 is missing or cannot be appli
 
 A parsed point is retained only when:
 
-- Euclidean range is at least 0.20 m and at most 3.60 m. The radar deployment boundary remains 3.50 m; the extra 0.10 m is processing margin for quantization and range jitter.
+- Euclidean range is at least 0.45 m and at most 3.10 m. The radar deployment envelope is 0.50-3.00 m; the extra 0.05 m below and 0.10 m above are processing margins for quantization and point jitter.
 - Side-information SNR is available.
 - Raw SNR is at least 20.
 
@@ -144,7 +149,7 @@ Geometry and SNR use the trimmed points. Printed position, radial velocity, and 
 - At most 32 tracks are retained.
 - Tracks older than 10 tracker updates are erased.
 
-Early returns occur before `tracker.update()`, so legacy track age and calibration counters still freeze. A successfully parsed radar frame that has no points, no accepted points, no cluster, or no descriptor explicitly calls `resetAllLongRangeGunEvidence()` so the new five-hit signature cannot bridge those rejected frames. A UART read that produces no complete radar frame does not reset evidence.
+Early returns occur before `tracker.update()`, so legacy track age and calibration counters still freeze. A successfully parsed radar frame that has no points, no accepted points, no cluster, or no descriptor calls `recordLongRangeGunMissAllTracks()`. That helper pushes `false, false` through `pushLongRangeGunObservation()` for every active track, shifting one miss into both the base and secondary seven-observation histories without clearing the remaining history. A UART read that produces no complete radar frame does not shift either history.
 
 ### 7. Calibration matching and alerting
 
@@ -160,7 +165,7 @@ The original calibration-confirmed alert path requires all of the following:
 6. Calibration key equal to `gun`, case-insensitively.
 7. Track state equal to `CONFIRMED`.
 
-The scenario-specific long-range path is independent of identity acquisition and requires five consecutive measured updates on one track that all have: a valid descriptor; nearest candidate `gun`; candidate distance at most 0.55; range 2.70-3.60 m; available range-profile power of at least 75.0 relative dB; length 0.18-0.55 m; width 0.07-0.55 m; raw mean SNR at least 100; quality at least 80%; and at least five descriptor points. A failed or unmeasured update resets this evidence. Either confirmed path activates the same LED and three-second toggling-buzzer alert.
+The current scenario-specific path is independent of identity acquisition and maintains two per-track seven-observation histories. The base history requires at least five passing observations. Each base pass requires: a valid descriptor; nearest candidate `gun`; candidate distance at most 0.48; range 0.50-3.00 m; available range-profile power of at least 80.0 relative dB; length 0.15-0.80 m; width 0.08-0.55 m; raw mean SNR at least 118; raw peak SNR at least 140; peak absolute radial velocity at most 0.13 m/s; absolute Z at most 0.50 m; quality at least 80%; and at least five descriptor points. The secondary history records only base-passing frames whose planarity is at least 0.75, flatness is at most 0.20, and trimmed radial-velocity standard deviation is at least 0.052 m/s; at least one secondary hit is required in the same seven-observation window. A failed or unmeasured update shifts a miss into both histories. Final scenario confirmation requires both history conditions. The original calibration-confirmed path remains independent and can still activate the same LED/toggling-buzzer alert; continuing detection refreshes the three-second expiry.
 
 ## Metric Reference
 
@@ -229,9 +234,11 @@ The latest user-saved `output.md` at approximately the same placement contains 6
 
 - Radial mean: arithmetic mean of signed sensor Doppler velocities over the untrimmed cluster.
 - Radial peak: largest absolute sensor Doppler magnitude; its sign is discarded.
+- Radial standard deviation: population standard deviation of signed Doppler velocities whose point indices survive the geometry outlier trim.
+- Radial span: maximum minus minimum signed Doppler velocity across those trimmed velocities.
 - Track X/Y/Z velocity: centroid displacement multiplied by 10.
 
-The track-velocity calculation assumes measurements are exactly 100 ms apart. Skipped frames or profiles with different frame periods cause incorrect magnitude estimates. Velocity is currently telemetry-only and is not used for classification.
+The track-velocity calculation assumes measurements are exactly 100 ms apart. Skipped frames or profiles with different frame periods cause incorrect magnitude estimates. Radial peak remains the base signature's active maximum-motion gate. Trimmed radial standard deviation is an active input only to the secondary shape-Doppler evidence gate. Track velocity and radial span remain telemetry-only.
 
 ### SNR and noise
 
@@ -366,8 +373,8 @@ acceptedRange=min-max m epsRange=min-max m minPts=5 total maxNeighbors=N coreCan
 ### Point and cluster gates
 
 ```text
-RANGE_MIN                         = 0.20 m
-RANGE_MAX                         = 3.60 m processing limit (3.50 m deployment boundary)
+RANGE_MIN                         = 0.45 m processing limit (0.50 m deployment boundary)
+RANGE_MAX                         = 3.10 m processing limit (3.00 m deployment boundary)
 MIN_SNR                           = 20 raw (~2.0 dB)
 DBSCAN_EPS_NEAR                   = 0.15 m through 1.50 m
 DBSCAN_EPS_MID                    = 0.20 m through 2.50 m
@@ -413,19 +420,29 @@ MAX_TRACKS                 = 32
 ### Scenario-specific long-range gun gates
 
 ```text
-LONG_RANGE_GUN_MIN_RANGE              = 2.70 m
-LONG_RANGE_GUN_MAX_RANGE              = 3.60 m
-LONG_RANGE_GUN_MIN_POWER_DB           = 75.0 relative dB
-LONG_RANGE_GUN_MAX_CANDIDATE_DISTANCE = 0.55
-LONG_RANGE_GUN_MIN_LENGTH             = 0.18 m
-LONG_RANGE_GUN_MAX_LENGTH             = 0.55 m
-LONG_RANGE_GUN_MIN_WIDTH              = 0.07 m
+LONG_RANGE_GUN_MIN_RANGE              = 0.50 m
+LONG_RANGE_GUN_MAX_RANGE              = 3.00 m
+LONG_RANGE_GUN_MIN_POWER_DB           = 80.0 relative dB
+LONG_RANGE_GUN_MAX_CANDIDATE_DISTANCE = 0.48
+LONG_RANGE_GUN_MIN_LENGTH             = 0.15 m
+LONG_RANGE_GUN_MAX_LENGTH             = 0.80 m
+LONG_RANGE_GUN_MIN_WIDTH              = 0.08 m
 LONG_RANGE_GUN_MAX_WIDTH              = 0.55 m
-LONG_RANGE_GUN_MIN_MEAN_SNR           = 100 raw (~10.0 dB)
+LONG_RANGE_GUN_MIN_MEAN_SNR           = 118 raw (~11.8 dB)
+LONG_RANGE_GUN_MIN_PEAK_SNR           = 140 raw (~14.0 dB)
+LONG_RANGE_GUN_MAX_ABS_VELOCITY       = 0.13 m/s
+LONG_RANGE_GUN_MAX_ABS_Z              = 0.50 m
 LONG_RANGE_GUN_MIN_QUALITY            = 80%
 LONG_RANGE_GUN_MIN_POINTS             = 5
-LONG_RANGE_GUN_REQUIRED_HITS          = 5 consecutive measured updates
+LONG_RANGE_GUN_REQUIRED_HITS          = 5 passing observations
+LONG_RANGE_GUN_HIT_WINDOW             = 7 evaluated observations
+LONG_RANGE_GUN_MIN_PLANARITY          = 0.75 secondary evidence
+LONG_RANGE_GUN_MAX_FLATNESS           = 0.20 secondary evidence
+LONG_RANGE_GUN_MIN_DOPPLER_STD_DEV    = 0.052 m/s secondary evidence
+LONG_RANGE_GUN_REQUIRED_SHAPE_DOPPLER_HITS = 1 observation in the same 7-observation window
 ```
+
+`longRangeGunConfirmed` is true only when the base history has at least five hits and the secondary shape-Doppler history has at least one hit. The secondary condition is evaluated only on a frame that already passes every base gate.
 
 The 0.40 exit threshold is not fully effective: `findMatch()` rejects distances at or above 0.25 and the caller clears the match before the 0.40 hysteresis branch can retain it.
 
@@ -485,14 +502,14 @@ loops:            32
 frame period:     100 ms
 range CFAR:       14 dB configuration value
 Doppler CFAR:     14 dB configuration value
-range FOV:        0.30 to 3.50 m
-azimuth FOV:      -45 to +45 degrees
-elevation FOV:    -45 to +45 degrees
+range FOV:        0.50 to 3.00 m
+azimuth FOV:      -30 to +30 degrees
+elevation FOV:    -30 to +30 degrees
 clutter removal:  disabled
 GUI outputs:      detected points, range profile, side information/statistics
 ```
 
-The 0.30-3.50 m range supersedes the earlier 0.30-1.50 m decision and is the fixed testing, calibration, and deployment envelope for the current project phase. The radar CFAR range FOV allows 3.50 m, and the ESP32 point filter allows 3.60 m so edge jitter is not rejected prematurely.
+The 0.50-3.00 m range supersedes the earlier 0.30-3.50 m decision and is the fixed testing, calibration, and deployment envelope for the current project phase. The radar CFAR range FOV accepts 0.50-3.00 m, and the ESP32 point filter accepts 0.45-3.10 m so edge jitter is not rejected prematurely.
 
 Switching to the 16-, 48-, or 64-loop profiles changes Doppler processing, sensitivity, point-cloud density, and relative-power compensation. Any rule thresholds derived under one profile must record the exact profile and must not be assumed transferable.
 
@@ -500,14 +517,14 @@ Switching to the 16-, 48-, or 64-loop profiles changes Doppler processing, sensi
 
 1. **Raw SNR unit mismatch:** code and output use 0.1 dB raw units while thresholds resemble whole-dB values.
 2. **Adaptive clustering needs hardware validation:** the 0.15/0.20/0.25 m bands and five-total-point minimum are source-verified starting values but can merge clutter or fragment targets under real placement conditions.
-3. **Sparse-feature sentinels:** planarity/thickness are zero below 10 points, bimodality below 20, and density variance below 30.
+3. **Sparse-feature sentinels:** planarity/thickness are zero below 10 points, bimodality below 20, and density variance below 30. Because the active secondary gate requires planarity at least 0.75, a scenario track cannot confirm until at least one base-passing frame in its current window contains ten or more trimmed descriptor points.
 4. **Calibration/runtime mismatch:** PCA-based Python features differ from ESP32 axis-based features.
 5. **Unused confirmation setting:** `MIN_POINTS_FOR_CONFIRMED_MATCH=15` is never referenced.
 6. **Mislabelled score:** the quality line prints a previous match distance or sentinel.
 7. **Misleading candidate threshold:** printed 0.25 is not the stricter 0.20 entry threshold.
 8. **Ineffective exit hysteresis:** matches at 0.25 or above are cleared before the 0.40 exit threshold can retain them.
 9. **Fixed-rate track velocity:** multiplying displacement by 10 ignores skipped frames and other frame periods.
-10. **Legacy temporal state freezes across early returns:** calibration/tracker “consecutive” counters are not strictly consecutive radar frames. The new long-range signature separately resets on parsed radar frames rejected before tracking.
+10. **Legacy temporal state freezes across early returns:** calibration/tracker “consecutive” counters are not strictly consecutive radar frames. The scenario signature separately shifts one miss into its seven-observation history on parsed radar frames rejected before tracking.
 11. **High-quality counter behavior:** descriptors with quality from 40 through 70 reset the valid counter but do not reset the high-quality counter.
 12. **Mixed point populations:** position/velocity/noise and geometry/SNR may refer to different trimmed/untrimmed sets.
 13. **Side-information alignment risk:** invalid TLV-1 points are dropped before TLV-7 values are assigned, which can shift later SNR/noise associations.
@@ -522,8 +539,9 @@ Switching to the 16-, 48-, or 64-loop profiles changes Doppler processing, sensi
 22. **Calibration provenance is incomplete:** raw samples, active profile, range, orientation, firmware version, and per-feature dispersion are not retained.
 23. **Duplicate/weakly separated profiles:** `GUN`, `BOX`, and `gun` coexist as nearest-neighbor candidates without a labeled negative-set validation record.
 24. **No automated packet fixtures or Arduino build tests:** source-contract and text-capture replay tests exist, but they do not compile the sketch or replay binary UART packets.
-25. **Positive-only alert tuning:** the aggressive long-range signature now covers two stationary gun-present captures at approximately 3 m but still cannot establish sensitivity, specificity, false-alert rate, or cross-range/orientation performance.
+25. **Development-pair tuning is not validation:** the secondary gate was selected from one human-only and one human-with-gun capture near 2.0-2.2 m, while the older capture set is positive-only and lacks the new Doppler-standard-deviation telemetry. These data cannot establish sensitivity, specificity, false-alert rate, or cross-range/orientation performance. The beyond-3.00 m under-cloth capture remains out of scope rather than a negative.
 26. **Long-range power is not object-isolated:** another reflector at a similar range can supply the TLV-2 peak used by a track and help a false candidate pass.
+27. **Secondary shape-Doppler overfit risk:** planarity and flatness are axis-dependent sparse-cluster estimates, and the 0.052 m/s lower standard-deviation bound reflects this one development pair. Different people, clothing, gun placement, orientation, or motion can remove the secondary hit and cause a false negative; difficult non-gun objects can still reproduce it.
 
 ## Rule-Based Detection Direction
 
@@ -539,9 +557,11 @@ Relative power, SNR, geometry, shape, velocity, and temporal stability can contr
 - Raw per-frame telemetry rather than confirmed-only summaries.
 - Separate development/tuning and held-out validation captures.
 
-The current long-range signature is a provisional, scenario-specific rule that aggregates five consecutive frames and requires candidate, range, power, broad geometry, raw SNR, quality, and point-count gates. Its 0.55 m horizontal maxima intentionally tolerate the large footprint change observed between two gun-present captures. Future revisions should normalize or stratify range-dependent power, explicitly handle missing shape features, and measure false positives as well as detection rate.
+The current concealed-gun signature is a provisional, scenario-specific rule that requires five passing observations in a seven-observation window and combines candidate, range, power, broad geometry, raw SNR, peak radial velocity, Z, quality, and point-count gates. Its broad geometry maxima intentionally tolerate footprint changes observed across gun-present captures. Future revisions should normalize or stratify range-dependent power, explicitly handle missing shape features, and measure false positives as well as detection rate.
 
-For the current phase, all labeled captures, power bands, calibration profiles, acceptance tests, and deployment claims must cover 0.30-3.50 m using `cfg_profiles/iwr6843aop_gun_balanced_32loops_14db.cfg`. Relative power will be supporting metal evidence rather than sufficient proof of a gun, because other metal objects can also produce strong returns. Long-range rules must explicitly handle five-to-six-point returns and the lack of shape features that are forced to zero below ten points.
+The implemented policy uses a 0.50-3.00 m deployment FOV, +/-30 degree azimuth/elevation FOV, 0.45-3.10 m ESP32 processing margin, candidate distance at most 0.48, preserved 80.0-relative-dB power floor, and peak absolute radial velocity at most 0.13 m/s. Existing geometry, SNR, quality, point-count, and adaptive-clustering gates remain unchanged. Scenario confirmation now requires both five base passes and one planar/flat/Doppler-standard-deviation secondary hit in the same seven-observation window. Radial span remains diagnostic-only.
+
+For the current phase, all labeled captures, power bands, calibration profiles, acceptance tests, and deployment claims must cover 0.50-3.00 m using `cfg_profiles/iwr6843aop_gun_balanced_32loops_14db.cfg`. Relative power remains supporting metal evidence rather than sufficient proof of a gun, because other metal objects can also produce strong returns. Rules must explicitly handle five-to-six-point returns and the lack of shape features that are forced to zero below ten points.
 
 ## Git History Reconstruction
 
@@ -742,3 +762,63 @@ Copy this template for every repository change. Replace every field with concret
 - Rollback procedure: Restore only `LONG_RANGE_GUN_MAX_LENGTH=0.30` and `LONG_RANGE_GUN_MAX_WIDTH=0.16`, restore the test expectations and historical track-99-only replay if required, update current-state documentation, and append a superseding rollback ledger entry. Do not alter the earlier historical entries.
 - Related commit: Not committed
 - Follow-up work: Flash and capture the corrected alert run immediately; if it triggers, begin same-range metal-negative testing before any further sensitivity expansion.
+
+### 2026-07-14 - Preserve 80-relative-dB power and approve the 0.50-3.00 m concealed-detection design
+
+- Status: User power edit preserved and source-inspected; design approved and documented; remaining firmware, profile, test, compilation, flashing, and hardware work pending
+- Requested by: User, after reporting good concealed-detection results near 2.5 m, selecting a 0.50-3.00 m target envelope with +/-30 degree azimuth/elevation, prioritizing false-alarm reduction, and explicitly choosing to preserve the uncommitted 80.0 relative-dB threshold
+- Objective: Establish an exact capture-backed implementation design that extends concealed-gun detection to 0.50-3.00 m, narrows the radar field of view, tightens calibration and motion gates, preserves the 80.0 power floor, and adds diagnostic motion-coherence measurements without inventing an unsupported alert threshold
+- Files changed: user-modified and subsequently policy-updated `parsing_detailed/parsing_detailed.ino`; `cfg_profiles/iwr6843aop_gun_balanced_32loops_14db.cfg`; `tests/test_long_range_alert_policy.py`; `tests/test_long_range_clustering_policy.py`; new `docs/superpowers/specs/2026-07-14-concealed-gun-operating-envelope-design.md`; new `docs/superpowers/plans/2026-07-14-concealed-gun-operating-envelope.md`; `PROJECT_RECORD.md`
+- Symbols/settings changed: user changed `LONG_RANGE_GUN_MIN_POWER_DB` from committed `65.0` to working-tree `80.0`; documented planned `aoaFovCfg -1 -30 30 -30 30`; planned `cfarFovCfg -1 0 0.50 3.00`; planned `RANGE_MIN=0.45`; planned `RANGE_MAX=3.10`; planned `LONG_RANGE_GUN_MIN_RANGE=0.50`; planned `LONG_RANGE_GUN_MAX_RANGE=3.00`; planned `LONG_RANGE_GUN_MAX_CANDIDATE_DISTANCE=0.48`; planned `LONG_RANGE_GUN_MAX_ABS_VELOCITY=0.13`; planned radial-velocity standard-deviation/span descriptor telemetry; Current Verified Baseline; Project file roles; Calibration matching and alerting; Current Detection Rules; Rule-Based Detection Direction; Change Ledger
+- Previous behavior: The checked-in balanced profile accepts 0.30-3.50 m and +/-45 degrees. Firmware point processing accepts 0.20-3.60 m. The current signature accepts 2.30-3.45 m, candidate distance through 0.55, and peak absolute radial velocity through 0.35 m/s. HEAD used a 65.0 relative-dB floor, while the user changed the working sketch to 80.0 before this design was recorded. The project record still described older 2.70-3.60 m, 75.0 dB, narrow geometry, and consecutive-hit behavior.
+- New behavior: The only current runtime-source change is the preserved user edit `LONG_RANGE_GUN_MIN_POWER_DB=80.0`; Codex has not yet changed the profile or remaining firmware constants. The approved next implementation will use a 0.50-3.00 m radar/signature envelope, 0.45-3.10 m processing margin, +/-30 degree angular FOV, candidate distance at most 0.48, peak absolute radial velocity at most 0.13 m/s, existing geometry/SNR/quality/point/five-of-seven gates, and diagnostic-only within-cluster Doppler dispersion telemetry.
+- Detailed implementation: Inspected the current source, profile, five saved output captures, existing source-contract tests, and recent commits. Replayed each object block against complete candidate, range, power, geometry, SNR, velocity, Z, quality, point-count, and five-of-seven gates. Rejected range-only expansion after it confirmed an additional moving near-range `gun` candidate. Compared candidate-distance and velocity limits, selected the conservative 0.48/0.13 pair, preserved the user's 80.0 floor, documented exact profile and firmware targets, and reconciled current-state record sections with the actual 1260415 firmware lineage and working-tree power edit.
+- Reason and evidence: Dominant concealed-gun track 1953 repeatedly reports peak absolute radial velocity near 0.121 m/s, while human-associated and other moving clusters commonly report larger peaks. With the approved candidate, range, 80.0-power, and 0.13-velocity gates, track 1953 retains 71 passing observations and 64 confirmed rows in `concealed_hand_bag.md`, 166 passes and 143 confirmed rows in `gun_concealed_bag.md`, and 50 passes and 44 confirmed rows in `gun_with_human_open.md`. The extra near-range track 287 in `gun_present_open.md` has two isolated passes and zero confirmed rows. `gun_under_cloth.md` has zero passing tracks because its recorded targets are beyond the new 3.00 m signature limit.
+- System impact: The preserved 80.0 source value immediately raises the scenario-specific power floor relative to HEAD and can reduce sensitivity. The specification and record changes do not yet alter radar commands, point filtering, clustering, calibration distance, motion gating, temporal state, GPIO, buzzer, or serial telemetry. Later implementation will narrow the radar FOV and alert envelope, reduce moving-cluster acceptance, and add UART telemetry and small per-descriptor computation.
+- Risks and trade-offs: All saved captures are positive scenarios rather than a controlled negative dataset. A 0.13 m/s absolute peak can miss a concealed gun moving rapidly toward or away from the radar, and 80.0 relative dB can miss weak, occluded, edge-range, or unfavourably oriented guns. TLV-2 power is not angularly isolated. Candidate distance and geometry use calibration/runtime feature definitions that are not identical. Diagnostic Doppler dispersion cannot become a gate until point-level hardware data supports a threshold.
+- Verification performed: Ran source/profile searches and `git diff` to isolate the user power edit; parsed all five `outputs/*.md` files with a read-only Python replay implementing every proposed signature gate and per-track five-of-seven history; scanned the new specification for incomplete placeholder markers and an accidental 65.0 approved threshold; ran `git diff --check`.
+- Verification results: The user firmware diff contains exactly one source change, `LONG_RANGE_GUN_MIN_POWER_DB` from 65.0 to 80.0. Replay results were: `concealed_hand_bag.md` track 1953, 71 passes/64 confirmed rows; `gun_concealed_bag.md` track 1953, 166/143; `gun_present_open.md` track 287, 2/0; `gun_under_cloth.md`, no passing tracks because recorded ranges exceed 3.00 m; `gun_with_human_open.md` track 1953, 50/44. The placeholder/obsolete-threshold scan found zero matches. `git diff --check` exited 0 with only line-ending conversion warnings. No Arduino build was run.
+- Hardware validation required/completed: Required and not completed for the proposed policy or preserved 80.0 threshold. Load the eventual updated balanced profile, flash the eventual updated detector, and capture labeled gun-present and negative trials at 0.50, 1.00, 1.50, 2.00, 2.50, and 3.00 m. Include open, under-clothing, handbag, concealed-bag, person-carried gun, empty scene, human-only motion, phone, keys, tools, belt buckle, metal bottle, plate, and metal box cases. Record orientation, height, lateral position, motion, serial evidence, and physical LED/buzzer behavior.
+- Rollback procedure: To revert only the current runtime source edit, restore `LONG_RANGE_GUN_MIN_POWER_DB=65.0` and append a superseding ledger entry. To reject the approved design before implementation, leave runtime/profile files otherwise unchanged, mark the specification superseded through a new ledger entry, and do not silently delete this history. After implementation, restore the profile to 0.30-3.50 m and +/-45 degrees, processing to 0.20-3.60 m, signature to 2.30-3.45 m, candidate distance to 0.55, and peak absolute radial velocity to 0.35 m/s.
+- Related commit: Not committed
+- Follow-up work: Execute `docs/superpowers/plans/2026-07-14-concealed-gun-operating-envelope.md` inline using TDD; the stale source-contract tests have been replaced before production edits and must first be observed failing for the approved missing behavior; then implement the profile/firmware/diagnostic changes, run all static/replay verification, compile if a toolchain is available, and complete labeled hardware validation
+
+### 2026-07-14 - Implement the 0.50-3.00 m concealed-gun operating policy
+
+- Status: Implemented and source/capture-replay verified; Arduino compilation, radar loading, flashing, physical alert confirmation, and controlled positive/negative hardware validation pending
+- Requested by: User, after approving the written concealed-detection design and instructing implementation while preserving the 80.0 relative-dB floor
+- Objective: Apply the 0.50-3.00 m and +/-30 degree operating envelope, tighten the candidate and absolute radial-velocity gates to reduce observed moving-cluster false confirmation, preserve the 80.0 power threshold, and expose diagnostic-only trimmed Doppler coherence metrics
+- Files changed: `parsing_detailed/parsing_detailed.ino`; `cfg_profiles/iwr6843aop_gun_balanced_32loops_14db.cfg`; `tests/test_long_range_alert_policy.py`; `tests/test_long_range_clustering_policy.py`; `docs/superpowers/specs/2026-07-14-concealed-gun-operating-envelope-design.md`; `docs/superpowers/plans/2026-07-14-concealed-gun-operating-envelope.md`; `PROJECT_RECORD.md`
+- Symbols/settings changed: `RANGE_MIN` from `0.20` to `0.45`; `RANGE_MAX` from `3.60` to `3.10`; `LONG_RANGE_GUN_MIN_RANGE` from `2.30` to `0.50`; `LONG_RANGE_GUN_MAX_RANGE` from `3.45` to `3.00`; preserved user-modified `LONG_RANGE_GUN_MIN_POWER_DB=80.0`; `LONG_RANGE_GUN_MAX_CANDIDATE_DISTANCE` from `0.55` to `0.48`; `LONG_RANGE_GUN_MAX_ABS_VELOCITY` from `0.35` to `0.13`; new `AdvancedShapeDescriptor::radialVelocityStdDev`; new `AdvancedShapeDescriptor::radialVelocitySpan`; constructor initialization; `extractDimensions()` trimmed-velocity collection and dispersion calculation; radial-velocity serial telemetry; `aoaFovCfg -1 -30 30 -30 30`; `cfarFovCfg -1 0 0.50 3.00`; balanced-profile header; rewritten `capture_rows()`; new `row_passes()`; new `confirmed_rows_by_track()`; concealed-track, moving-track, under-cloth-boundary, profile, temporal-window, and diagnostic-only tests; clustering processing-margin test; Current Verified Baseline; Project file roles; Point filtering; Calibration matching and alerting; Velocity; Current Detection Rules; Radar Configuration Baseline; Known Limitations; Rule-Based Detection Direction; Change Ledger
+- Previous behavior: The balanced profile accepted 0.30-3.50 m and +/-45 degrees. ESP32 point filtering accepted 0.20-3.60 m. The scenario signature accepted 2.30-3.45 m, candidate distance through 0.55, and peak absolute radial velocity through 0.35 m/s. The user had already raised power from committed 65.0 to 80.0. Saved-capture replay showed that extending only the range down to 0.50 m allowed moving near-range track 287 to confirm. Firmware printed untrimmed mean and peak radial velocity but no within-cluster dispersion diagnostics. Existing alert-policy tests still asserted superseded consecutive-hit fields and older 2.70-3.60 m/75.0/narrow-geometry constants.
+- New behavior: The profile accepts 0.50-3.00 m within +/-30 degrees while retaining the waveform, 32 loops, 100 ms period, both 14 dB CFAR commands, clutter-removal state, and GUI outputs. Point processing accepts 0.45-3.10 m. The scenario signature requires 0.50-3.00 m, candidate distance at most 0.48, 80.0 relative dB, and peak absolute radial velocity at most 0.13 m/s; geometry, SNR, Z, quality, point-count, and five-of-seven gates are unchanged. Descriptor telemetry now reports population standard deviation and span of trimmed signed Doppler velocities, but those fields do not enter either alert path.
+- Detailed implementation: Replaced the stale source-contract test with per-object parsing of all five saved output files and an exact per-track seven-observation replay. Added explicit source/profile contracts before production edits and observed their failures. Updated only the two profile FOV commands/header and seven approved firmware constants. In `extractDimensions()`, retained velocity values whose matching point indices survive the existing 2.5-times-median geometry trim, calculated their double-precision mean and population variance, stored standard deviation and maximum-minus-minimum span, and added both values to serial telemetry. Kept the existing untrimmed radial mean/peak calculation and used only peak for the active signature, preserving replay comparability. Updated current-state documentation and completed the approved TDD plan without staging or committing.
+- Reason and evidence: A range-only replay confirmed near-range moving track 287 in `outputs/gun_present_open.md`. With the complete implemented policy, dominant concealed-gun track 1953 continues to confirm in `concealed_hand_bag.md`, `gun_concealed_bag.md`, and `gun_with_human_open.md`, while track 287 has isolated passes but zero confirmed rows. Candidate distance 0.48 and peak velocity 0.13 were selected from saved capture comparisons prioritizing false-alarm reduction. The user explicitly selected 80.0 relative dB. Dispersion remains diagnostic because saved text captures do not include individual point velocities needed to derive a threshold.
+- System impact: The radar admits a narrower spatial region and the ESP32 discards points outside its new margins. The scenario alert can operate from 0.50 m but no longer covers targets beyond 3.00 m. Tighter candidate, power, and velocity gates reduce acceptance but can increase misses. Two floats are added per descriptor and trimmed-velocity collection/calculation adds bounded memory and linear work per descriptor. Serial output grows by two numeric fields. Parser format, UART settings, adaptive DBSCAN, tracker association, calibration distance formula, original calibration-confirmed path, temporal window, LED GPIO11, buzzer GPIO12, and alert timing remain unchanged.
+- Risks and trade-offs: The available captures are positive scenarios, not a controlled negative set. The 80.0 power floor can reject weak or occluded guns, especially near the 3.00 m boundary. A 0.13 m/s absolute peak can reject a concealed gun moving quickly toward or away from the sensor. The TLV-2 peak remains range-only and can come from another reflector. The +/-30 degree FOV can miss targets outside the narrower cone. Standard deviation/span are new diagnostics without hardware-observed distributions. The under-cloth capture lies just beyond 3.00 m and is intentionally out of scope, not proof of a negative.
+- Verification performed: TDD red run with `$env:PYTHONDONTWRITEBYTECODE='1'; python -m unittest tests.test_long_range_clustering_policy tests.test_long_range_alert_policy -v`; focused parameter/profile/replay run with six named test methods; green and final full runs of both policy modules; exact PowerShell assertions for nine changed constants, 24 protected constants, eight protected/required profile lines, absence of diagnostic fields from the signature gate, and firmware brace balance; placeholder scan of the new spec and plan; `git diff --check`; `Get-Command arduino-cli,g++,clang++`.
+- Verification results: The red run exited 1 with 12 tests executed and 14 failures caused by old range/profile/candidate/velocity values, missing diagnostic fields, and the not-yet-admitted near-range track; the 80.0 constant and existing five-of-seven/positive-track contracts passed. The focused post-parameter run exited 0 with six tests passing. The green full run exited 0 with 12 tests passing in 0.332 seconds. The fresh comprehensive verifier exited 0 with 12 tests passing in 0.186 seconds, nine changed-constant assertions, 24 protected-constant assertions, eight profile-line assertions, diagnostic-only gate isolation, and 276 opening/276 closing braces. Placeholder scans found zero matches. `git diff --check` exited 0 with line-ending conversion warnings only. `arduino-cli`, `g++`, and `clang++` were unavailable.
+- Hardware validation required/completed: Required and not completed. Load `cfg_profiles/iwr6843aop_gun_balanced_32loops_14db.cfg` through the separate radar CLI process, compile and flash `parsing_detailed/parsing_detailed.ino`, retain the current SPIFFS calibration, and capture labeled trials at 0.50, 1.00, 1.50, 2.00, 2.50, and 3.00 m. Include open, under-clothing, handbag, concealed-bag, person-carried gun, empty scene, human-only motion, phone, keys, tools, belt buckle, metal bottle, plate, and metal box. Verify serial gate evidence, new `std`/`span` telemetry, `LONG-RANGE GUN SIGNATURE`, `ALERT TRIGGERED - GUN DETECTED!`, GPIO11 LED behavior, and GPIO12 buzzer toggling. No build, radar load, flash, fresh capture, or physical validation was performed in this change.
+- Rollback procedure: Restore profile header/FOV commands to 0.30-3.50 m and +/-45 degrees; restore `RANGE_MIN=0.20`, `RANGE_MAX=3.60`, signature range 2.30-3.45 m, candidate limit 0.55, and peak-velocity limit 0.35; restore power to 65.0 only if separately reverting the user's 80.0 decision; remove `radialVelocityStdDev`, `radialVelocitySpan`, filtered-velocity collection/calculation, and serial fields; restore tests to the resulting policy; update current-state sections; append a superseding rollback entry rather than deleting this history.
+- Related commit: Not committed
+- Follow-up work: Compile and flash with an Arduino toolchain; load the updated balanced profile; perform the complete labeled hardware matrix; use captured per-cluster standard deviation/span distributions to decide whether a translation-invariant coherence gate can safely supplement or replace the absolute 0.13 m/s peak gate
+
+### 2026-07-15 - Add secondary shape-Doppler confirmation to reject the human-only capture
+
+- Status: Implemented and source/capture-replay verified; Arduino compilation, radar loading, flashing, physical alert confirmation, and independent hardware validation pending
+- Requested by: User, after `outputs/only_human_present.md` activated the alert at approximately 2.0-2.2 m and comparison with `outputs/human_with_gun.md`
+- Objective: Preserve the existing 80.0-relative-dB base signature while preventing the supplied human-only dominant track from confirming unless the current seven-observation window also contains the planar/flat Doppler-dispersion evidence observed in the human-with-gun capture
+- Files changed: `parsing_detailed/parsing_detailed.ino`; `tests/test_long_range_alert_policy.py`; new `docs/superpowers/plans/2026-07-15-human-gun-shape-doppler-gate.md`; `PROJECT_RECORD.md`. User-supplied `outputs/only_human_present.md` and `outputs/human_with_gun.md` are new development inputs referenced by the tests but were not modified by Codex. Existing changes in `cfg_profiles/iwr6843aop_gun_balanced_32loops_14db.cfg`, `tests/test_long_range_clustering_policy.py`, the 2026-07-14 spec/plan, `.claude/`, and `IWR_Config.md` were preserved and not changed for this tuning.
+- Symbols/settings changed: new `LONG_RANGE_GUN_MIN_PLANARITY=0.75`; new `LONG_RANGE_GUN_MAX_FLATNESS=0.20`; new `LONG_RANGE_GUN_MIN_DOPPLER_STD_DEV=0.052`; new `LONG_RANGE_GUN_REQUIRED_SHAPE_DOPPLER_HITS=1`; new `TrackedObject::longRangeGunShapeDopplerHitHistory`; new `TrackedObject::longRangeGunShapeDopplerWindowHits`; new `TrackedObject::longRangeGunShapeDopplerEvidenceThisFrame`; `pushLongRangeGunObservation(TrackedObject&, bool, bool)`; `evaluateLongRangeGunSignature()`; `recordLongRangeGunMissAllTracks()`; long-range signature/evidence serial telemetry; firmware hardware-header comments reconciled to the pre-existing user values GPIO2/GPIO38; `capture_rows()` optional shape/Doppler parsing; new `row_has_shape_doppler_evidence()`; new `final_confirmed_rows_by_track()`; human-only, human-with-gun, source-state, secondary-gate, and constant tests; Current Verified Baseline; Project file roles; Hardware and interfaces; Calibration matching and alerting; Velocity; Current Detection Rules; Known Limitations; Rule-Based Detection Direction; Change Ledger
+- Previous behavior: Scenario confirmation depended only on five base passes in seven observations. In the supplied captures, dominant track 1756 produced 103 base-passing human-only rows and 106 base-passing human-with-gun rows; both recordings contained an alert trigger, and the firmware printed 88 human-only and 85 human-with-gun `LONG-RANGE GUN SIGNATURE` rows. Relative power, candidate distance, SNR, geometry, peak Doppler, and Doppler standard deviation overlapped too strongly to provide a reliable standalone threshold. Trimmed Doppler standard deviation and span were telemetry-only.
+- New behavior: The base pass expression, its five-of-seven history, `LONG_RANGE_GUN_MIN_POWER_DB=80.0`, and `LONG_RANGE_GUN_MAX_ABS_VELOCITY=0.13` are preserved. A second seven-observation bit history records a hit only when a base-passing descriptor also has planarity at least 0.75, flatness at most 0.20, and trimmed radial-velocity population standard deviation at least 0.052 m/s. `longRangeGunConfirmed` now requires at least five base hits and at least one secondary hit in the same window. A failed, unmeasured, or rejected radar update shifts a miss into both histories. Serial output exposes the secondary current-frame flag, hit count, requirement, and exact thresholds. The original calibration-confirmed gun path remains independent.
+- Detailed implementation: Extended each track with a secondary bit history, count, and per-frame flag; initialized and reset them beside the existing base state. Changed `pushLongRangeGunObservation()` to shift both histories under one seven-bit mask, count each history, and assign confirmation from their conjunction. Calculated `shapeDopplerPass` only after all base gates pass and did not add a Doppler-peak lower bound. Updated both explicit miss paths to push `false, false`. Added capture parsing for optional `std`, planarity, and flatness so older captures without Doppler dispersion remain usable for base-policy tests. Added a final-policy replay that keeps separate per-track base and secondary deques. Corrected only the firmware header comments for the already-present GPIO2/GPIO38 values; the constants themselves were not changed in this tuning.
+- Reason and evidence: Among base-passing dominant-track rows, human-only Doppler peak was 0.1207 m/s in 42/103 rows versus 59/106 for human-with-gun, and median Doppler standard deviation was 0.0493 versus 0.0551 m/s; standalone frame-level separation was weak. Conditioning on planarity at least 0.75 and flatness at most 0.20 produced four human-only rows, all with Doppler standard deviation at most 0.0493 m/s, versus eighteen human-with-gun rows, eleven of which met the selected 0.052 m/s standard-deviation floor. Object-row replay of the complete conjunction produced zero secondary hits and zero final confirmations for human-only track 1756, and eleven secondary hits plus 48 final confirmations for human-with-gun track 1756.
+- System impact: Adds one byte history, one integer count, and one boolean flag per track subject to C++ alignment, plus one additional seven-bit count and three comparisons per evaluated track. UART output grows by secondary evidence fields. The radar profile, packet parser, range filtering, DBSCAN, descriptor formulas, calibration database/distance, base signature thresholds, original identity alert path, alert duration, and user-set GPIO constants are unchanged. Requiring planarity makes at least one ten-or-more-point base-passing frame necessary within the active window.
+- Risks and trade-offs: The thresholds were tuned and replayed on the same single negative/positive pair and are not a held-out accuracy estimate. The text replay advances histories on parsed object rows and cannot perfectly reconstruct every absent-track or rejected radar update, although firmware source pushes misses through both histories. Sparse five-to-nine-point gun returns cannot produce nonzero planarity and therefore cannot supply the required secondary hit. Different people, clothing, gun positions, orientations, concealment, motion, and clutter can cause false negatives or reproduce the evidence in a non-gun object. The global TLV-2 power ambiguity and calibration/runtime feature mismatch remain. The independent calibration-confirmed path can still alert if a human-only track ever acquires a true `gun` identity under its separate thresholds.
+- Verification performed: Wrote the new capture-replay and source-contract tests before firmware changes; ran `$env:PYTHONDONTWRITEBYTECODE='1'; python -m unittest tests.test_long_range_alert_policy -v` for RED and GREEN; ran `$env:PYTHONDONTWRITEBYTECODE='1'; python -m unittest tests.test_long_range_clustering_policy tests.test_long_range_alert_policy -v`; ran PowerShell assertions for required firmware contracts, both explicit `false, false` miss calls, brace balance, completed plan steps, one ledger entry, and new-plan trailing whitespace; queried `Get-Command` for `arduino-cli`, `g++`, and `clang++`; ran `git diff --check`; inspected final `git status --short` without staging or committing; requested an independent read-only firmware/test/record review and corrected the current-state early-return helper description it identified.
+- Verification results: The RED run exited 1 with 10 tests and 17 expected failures for missing secondary constants, state, conjunction, replay result, and telemetry while existing profile/base tests passed. The focused GREEN run exited 0 with 10 tests passing in 0.932 seconds. The first combined run exited 0 with 15 tests passing in 0.562 seconds. The final comprehensive run exited 0 with 15 tests passing in 0.433 seconds, 14/14 required firmware contracts, exactly two explicit miss calls, 277 opening/277 closing braces, zero unchecked plan steps, exactly one new ledger heading, and zero trailing-whitespace lines in the new plan. `git diff --check` exited 0 with line-ending warnings only. The independent review found no firmware or replay-logic defect; it found one stale current-state reference to nonexistent `resetAllLongRangeGunEvidence()`, which was corrected to the actual `recordLongRangeGunMissAllTracks()` `false, false` shift semantics. It also noted a minor opportunity to scope source-contract assertions more tightly. No `arduino-cli`, `g++`, or `clang++` command was available, so no firmware compilation was performed.
+- Hardware validation required/completed: Required and not completed. Load `cfg_profiles/iwr6843aop_gun_balanced_32loops_14db.cfg`, compile and flash `parsing_detailed/parsing_detailed.ino`, retain the current SPIFFS calibration, and repeat the same human-only and human-with-gun trials at 2.0-2.2 m. Human-only must show `shapeDoppler=no`, `shapeHits=0/1`, `confirmed=no`, no alert line, GPIO2 low, and GPIO38 inactive even if base hits reach 5/5. Human-with-gun must produce at least one `shapeDoppler=yes` frame inside a window with five base hits, then print the signature/alert and drive GPIO2/GPIO38. Repeat with multiple people, clothing, positions, orientations, and motion at 0.50, 1.00, 1.50, 2.00, 2.50, and 3.00 m, plus phone, keys, tools, belt buckle, bottle, plate, and metal-box negatives.
+- Rollback procedure: Remove the four new `LONG_RANGE_GUN_*` secondary constants and three per-track secondary fields/initializers; restore `pushLongRangeGunObservation(TrackedObject&, bool)` and its base-only confirmation assignment; change both miss calls back to one boolean; remove `shapeDopplerPass` and secondary telemetry; return the standard-deviation comment/record to diagnostic-only; remove the secondary replay/source contracts and 2026-07-15 plan; restore affected current-state documentation; append a superseding rollback ledger entry. Preserve the user's 80.0 power floor, 0.13 m/s peak cap, GPIO2/GPIO38 constants, and 2026-07-14 operating policy unless separately authorized to change them.
+- Related commit: Not committed
+- Follow-up work: Perform the exact on-device validation matrix and save the new serial captures. If gun sensitivity is too low, collect additional controlled paired captures before changing the one-secondary-hit requirement or the 0.75/0.20/0.052 thresholds; do not relax the base signature from this one development pair.

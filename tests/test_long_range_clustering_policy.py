@@ -28,7 +28,8 @@ def function_body(signature: str, next_marker: str) -> str:
 
 class LongRangeClusteringPolicyTests(unittest.TestCase):
     def test_processing_range_includes_deployment_boundary_with_margin(self):
-        self.assertEqual(numeric_constant("RANGE_MAX"), 3.60)
+        self.assertEqual(numeric_constant("RANGE_MIN"), 0.45)
+        self.assertEqual(numeric_constant("RANGE_MAX"), 3.10)
 
     def test_all_cluster_and_descriptor_gates_accept_five_points(self):
         for name in (

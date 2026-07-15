@@ -6,8 +6,8 @@
  * ENHANCED WITH GHOST REJECTION & QUALITY VALIDATION
  *
  * Hardware:
- * - LED -> GPIO 11 (through 220Ω resistor to GND)
- * - Buzzer -> GPIO 12 (active buzzer to GND)
+ * - LED -> GPIO 2 (through 220Ω resistor to GND)
+ * - Buzzer -> GPIO 38 (active buzzer to GND)
  * - Button -> GPIO 4 (other side to GND)
  */
 
@@ -31,8 +31,8 @@ unsigned long lastButtonPress = 0;
 // =========================================================
 // GPIO Configuration for Alert System
 // =========================================================
-const int LED_PIN = 11;
-const int BUZZER_PIN = 12;
+const int LED_PIN = 2;
+const int BUZZER_PIN = 38;
 
 const int ALERT_DURATION = 3000;
 const int BEEP_PATTERN_FAST = 200;
@@ -78,10 +78,10 @@ const float DBSCAN_MID_RANGE_MAX = 2.50;
 const int DBSCAN_MIN_POINTS = 5;
 
 // Range filtering
-const float RANGE_MIN = 0.20;
-// The radar deployment boundary is 3.50 m. Keep 10 cm of processing margin
-// for quantization and point-to-point range jitter at the edge.
-const float RANGE_MAX = 3.60;
+// The radar deployment envelope is 0.50-3.00 m. Keep 5 cm below and 10 cm
+// above it for range-bin quantization and point-to-point range jitter.
+const float RANGE_MIN = 0.45;
+const float RANGE_MAX = 3.10;
 
 // SNR threshold
 const int MIN_SNR = 20;
@@ -137,15 +137,13 @@ const int MIN_DESCRIPTORS_FOR_ROBUST = 5;
 const int PRESENCE_HOLD_FRAMES = 10;
 const int MIN_HITS_FOR_CONFIRMED = 8;
 
-// Scenario-specific gun signature. These gates are derived from five labeled
-// captures: open at 3.0 m, under cloth at 3.0 m, hand bag at 2.5 m, concealed
-// bag at 2.5 m, and carried by a person at 2.6 m. The static boundary clutter
-// at 3.486-3.49 m (5-6 points, SNR peak <= 118, z ~ -0.6 m) must stay below
-// every SNR/width/range/z gate.
-const float LONG_RANGE_GUN_MIN_RANGE = 2.30;
-const float LONG_RANGE_GUN_MAX_RANGE = 3.45;
-const float LONG_RANGE_GUN_MIN_POWER_DB = 65.0;
-const float LONG_RANGE_GUN_MAX_CANDIDATE_DISTANCE = 0.55;
+// Scenario-specific concealed-gun signature. The 0.50-3.00 m range and
+// tighter candidate/motion limits prioritize false-alert reduction while
+// retaining repeated confirmation of the dominant saved concealed-gun tracks.
+const float LONG_RANGE_GUN_MIN_RANGE = 0.50;
+const float LONG_RANGE_GUN_MAX_RANGE = 3.00;
+const float LONG_RANGE_GUN_MIN_POWER_DB = 80.0;
+const float LONG_RANGE_GUN_MAX_CANDIDATE_DISTANCE = 0.48;
 const float LONG_RANGE_GUN_MIN_LENGTH = 0.15;
 const float LONG_RANGE_GUN_MAX_LENGTH = 0.80;
 // Cross-range width is quantized by the azimuth resolution: near 3.1 m the
@@ -157,7 +155,7 @@ const float LONG_RANGE_GUN_MIN_WIDTH = 0.08;
 const float LONG_RANGE_GUN_MAX_WIDTH = 0.55;
 const float LONG_RANGE_GUN_MIN_MEAN_SNR = 118.0;
 const float LONG_RANGE_GUN_MIN_PEAK_SNR = 140.0;
-const float LONG_RANGE_GUN_MAX_ABS_VELOCITY = 0.35;
+const float LONG_RANGE_GUN_MAX_ABS_VELOCITY = 0.13;
 const float LONG_RANGE_GUN_MAX_ABS_Z = 0.50;
 const float LONG_RANGE_GUN_MIN_QUALITY = 80.0;
 const int LONG_RANGE_GUN_MIN_POINTS = 5;
@@ -167,6 +165,14 @@ const int LONG_RANGE_GUN_MIN_POINTS = 5;
 // still present.
 const int LONG_RANGE_GUN_REQUIRED_HITS = 5;
 const int LONG_RANGE_GUN_HIT_WINDOW = 7;
+// Human-only and human-with-gun captures at approximately 2.0-2.2 m overlap
+// on power, calibration distance, SNR, and peak Doppler. A base-passing frame
+// supplies secondary evidence only when its cluster is planar, flat, and has
+// the observed trimmed Doppler dispersion of the gun-present capture.
+const float LONG_RANGE_GUN_MIN_PLANARITY = 0.75;
+const float LONG_RANGE_GUN_MAX_FLATNESS = 0.20;
+const float LONG_RANGE_GUN_MIN_DOPPLER_STD_DEV = 0.052;
+const int LONG_RANGE_GUN_REQUIRED_SHAPE_DOPPLER_HITS = 1;
 
 // =========================================================
 // Data Structures
@@ -292,6 +298,10 @@ public:
   float reflectionConsistency;
   float meanRadialVelocity;
   float maxAbsRadialVelocity;
+  // Within-cluster Doppler coherence. Standard deviation supports the
+  // scenario-specific secondary gate; span remains diagnostic-only.
+  float radialVelocityStdDev;
+  float radialVelocitySpan;
   float meanNoise;
   float meanSnrMargin;
 
@@ -303,6 +313,7 @@ public:
 
   AdvancedShapeDescriptor()
     : meanRadialVelocity(0), maxAbsRadialVelocity(0),
+      radialVelocityStdDev(0), radialVelocitySpan(0),
       meanNoise(0), meanSnrMargin(0) {}
 
   void compute(float l, float w, float h,
@@ -769,6 +780,9 @@ struct TrackedObject {
   uint8_t longRangeGunHitHistory;
   int longRangeGunWindowHits;
   bool longRangeGunEvidenceThisFrame;
+  uint8_t longRangeGunShapeDopplerHitHistory;
+  int longRangeGunShapeDopplerWindowHits;
+  bool longRangeGunShapeDopplerEvidenceThisFrame;
   bool longRangeGunConfirmed;
   bool longRangePowerAvailable;
   float longRangePowerDb;
@@ -890,6 +904,9 @@ public:
         t.longRangeGunHitHistory = 0;
         t.longRangeGunWindowHits = 0;
         t.longRangeGunEvidenceThisFrame = false;
+        t.longRangeGunShapeDopplerHitHistory = 0;
+        t.longRangeGunShapeDopplerWindowHits = 0;
+        t.longRangeGunShapeDopplerEvidenceThisFrame = false;
         t.longRangeGunConfirmed = false;
         t.longRangePowerAvailable = false;
         t.longRangePowerDb = 0.0f;
@@ -1349,20 +1366,33 @@ public:
 
 // Explicit prototypes keep the Arduino sketch preprocessor from placing a
 // prototype before the custom tracker and parser types are declared.
-void pushLongRangeGunObservation(TrackedObject& track, bool pass);
+void pushLongRangeGunObservation(TrackedObject& track,
+                                 bool pass, bool shapeDopplerPass);
 void evaluateLongRangeGunSignature(TrackedObject& track,
                                    const ParserDiagnostics& diagnostics);
 
-void pushLongRangeGunObservation(TrackedObject& track, bool pass) {
+void pushLongRangeGunObservation(TrackedObject& track,
+                                 bool pass, bool shapeDopplerPass) {
+  const uint8_t historyMask =
+    (uint8_t)((1u << LONG_RANGE_GUN_HIT_WINDOW) - 1u);
   track.longRangeGunHitHistory = (uint8_t)(
-    ((track.longRangeGunHitHistory << 1) | (pass ? 1u : 0u)) &
-    ((1u << LONG_RANGE_GUN_HIT_WINDOW) - 1u));
-  int hits = 0;
+    ((track.longRangeGunHitHistory << 1) | (pass ? 1u : 0u)) & historyMask);
+  track.longRangeGunShapeDopplerHitHistory = (uint8_t)(
+    ((track.longRangeGunShapeDopplerHitHistory << 1) |
+     (shapeDopplerPass ? 1u : 0u)) & historyMask);
+  int baseHits = 0;
+  int shapeDopplerHits = 0;
   for (int i = 0; i < LONG_RANGE_GUN_HIT_WINDOW; i++) {
-    if (track.longRangeGunHitHistory & (1u << i)) hits++;
+    if (track.longRangeGunHitHistory & (1u << i)) baseHits++;
+    if (track.longRangeGunShapeDopplerHitHistory & (1u << i)) {
+      shapeDopplerHits++;
+    }
   }
-  track.longRangeGunWindowHits = hits;
-  track.longRangeGunConfirmed = hits >= LONG_RANGE_GUN_REQUIRED_HITS;
+  track.longRangeGunWindowHits = baseHits;
+  track.longRangeGunShapeDopplerWindowHits = shapeDopplerHits;
+  track.longRangeGunConfirmed =
+    baseHits >= LONG_RANGE_GUN_REQUIRED_HITS &&
+    shapeDopplerHits >= LONG_RANGE_GUN_REQUIRED_SHAPE_DOPPLER_HITS;
 }
 
 bool findRangeProfilePeakNear(const ParserDiagnostics& diagnostics,
@@ -1396,6 +1426,7 @@ bool findRangeProfilePeakNear(const ParserDiagnostics& diagnostics,
 void evaluateLongRangeGunSignature(TrackedObject& track,
                                    const ParserDiagnostics& diagnostics) {
   track.longRangeGunEvidenceThisFrame = false;
+  track.longRangeGunShapeDopplerEvidenceThisFrame = false;
   track.longRangePowerAvailable = false;
   track.longRangePowerDb = 0.0f;
   track.longRangePowerRange = 0.0f;
@@ -1404,6 +1435,8 @@ void evaluateLongRangeGunSignature(TrackedObject& track,
   if (!track.active || track.allDescriptors.empty()) {
     track.longRangeGunHitHistory = 0;
     track.longRangeGunWindowHits = 0;
+    track.longRangeGunShapeDopplerHitHistory = 0;
+    track.longRangeGunShapeDopplerWindowHits = 0;
     track.longRangeGunConfirmed = false;
     return;
   }
@@ -1413,7 +1446,7 @@ void evaluateLongRangeGunSignature(TrackedObject& track,
   // not erase the accumulated evidence the way the old consecutive counter
   // did, or the alert flaps while the gun is still present.
   if (!track.measuredThisFrame) {
-    pushLongRangeGunObservation(track, false);
+    pushLongRangeGunObservation(track, false, false);
     return;
   }
 
@@ -1443,8 +1476,15 @@ void evaluateLongRangeGunSignature(TrackedObject& track,
     desc.confidenceScore >= LONG_RANGE_GUN_MIN_QUALITY &&
     desc.numPoints >= LONG_RANGE_GUN_MIN_POINTS;
 
+  const bool shapeDopplerPass =
+    passes &&
+    desc.planarityScore >= LONG_RANGE_GUN_MIN_PLANARITY &&
+    desc.flatnessRatio <= LONG_RANGE_GUN_MAX_FLATNESS &&
+    desc.radialVelocityStdDev >= LONG_RANGE_GUN_MIN_DOPPLER_STD_DEV;
+
   track.longRangeGunEvidenceThisFrame = passes;
-  pushLongRangeGunObservation(track, passes);
+  track.longRangeGunShapeDopplerEvidenceThisFrame = shapeDopplerPass;
+  pushLongRangeGunObservation(track, passes, shapeDopplerPass);
 }
 
 // =========================================================
@@ -1653,8 +1693,10 @@ bool extractDimensions(const ClusterData& cluster, AdvancedShapeDescriptor& desc
   Point3D centroid = cluster.centroid;
   std::vector<Point3D> filtered;
   std::vector<uint16_t> filteredSnrs;
+  std::vector<float> filteredVelocities;
   filtered.reserve(cluster.points.size());
   filteredSnrs.reserve(cluster.snrs.size());
+  filteredVelocities.reserve(cluster.velocities.size());
 
   std::vector<float> distances;
   distances.reserve(cluster.points.size());
@@ -1667,6 +1709,9 @@ bool extractDimensions(const ClusterData& cluster, AdvancedShapeDescriptor& desc
     if (centroid.distanceTo(cluster.points[i]) < 2.5f * medianDist) {
       filtered.push_back(cluster.points[i]);
       filteredSnrs.push_back(cluster.snrs[i]);
+      if (i < cluster.velocities.size()) {
+        filteredVelocities.push_back(cluster.velocities[i]);
+      }
     }
   }
 
@@ -1709,6 +1754,27 @@ bool extractDimensions(const ClusterData& cluster, AdvancedShapeDescriptor& desc
     descriptor.meanNoise = (float)(noiseSum / metricCount);
     descriptor.meanSnrMargin = (float)(marginSum / metricCount);
   }
+
+  if (!filteredVelocities.empty()) {
+    double trimmedVelocitySum = 0.0;
+    float minVelocity = filteredVelocities[0];
+    float maxVelocity = filteredVelocities[0];
+    for (float velocity : filteredVelocities) {
+      trimmedVelocitySum += (double)velocity;
+      minVelocity = min(minVelocity, velocity);
+      maxVelocity = max(maxVelocity, velocity);
+    }
+    const double trimmedVelocityMean =
+      trimmedVelocitySum / filteredVelocities.size();
+    double varianceSum = 0.0;
+    for (float velocity : filteredVelocities) {
+      const double delta = (double)velocity - trimmedVelocityMean;
+      varianceSum += delta * delta;
+    }
+    descriptor.radialVelocityStdDev = (float)sqrt(
+      varianceSum / filteredVelocities.size());
+    descriptor.radialVelocitySpan = maxVelocity - minVelocity;
+  }
   return true;
 }
 
@@ -1729,11 +1795,12 @@ void recordLongRangeGunMissAllTracks() {
   for (auto& track : tracker->getTracks()) {
     if (!track.active) continue;
     track.longRangeGunEvidenceThisFrame = false;
+    track.longRangeGunShapeDopplerEvidenceThisFrame = false;
     track.longRangePowerAvailable = false;
     track.longRangePowerDb = 0.0f;
     track.longRangePowerRange = 0.0f;
     track.longRangePowerRaw = 0;
-    pushLongRangeGunObservation(track, false);
+    pushLongRangeGunObservation(track, false, false);
   }
 }
 
@@ -2039,9 +2106,11 @@ void loop() {
     Serial.println();
 
     if (track.longRangeGunConfirmed) {
-      Serial.printf("     🚨 LONG-RANGE GUN SIGNATURE (%d/%d hits in last %d frames)\n",
+      Serial.printf("     🚨 LONG-RANGE GUN SIGNATURE (base %d/%d, shape-Doppler %d/%d in last %d frames)\n",
                     track.longRangeGunWindowHits,
                     LONG_RANGE_GUN_REQUIRED_HITS,
+                    track.longRangeGunShapeDopplerWindowHits,
+                    LONG_RANGE_GUN_REQUIRED_SHAPE_DOPPLER_HITS,
                     LONG_RANGE_GUN_HIT_WINDOW);
     } else if (track.matchedName.length() > 0) {
       if (track.state == TrackedObject::TEMP_LOST) {
@@ -2075,8 +2144,9 @@ void loop() {
     } else {
       Serial.println("     Range-profile relative power: unavailable (TLV 2 missing)");
     }
-    Serial.printf("     Radial velocity estimate: mean=%+.4fm/s peak=%.4fm/s | Track velocity=(%+.4f,%+.4f,%+.4f)m/s\n",
+    Serial.printf("     Radial velocity estimate: mean=%+.4fm/s peak=%.4fm/s std=%.4fm/s span=%.4fm/s | Track velocity=(%+.4f,%+.4f,%+.4f)m/s\n",
                   desc.meanRadialVelocity, desc.maxAbsRadialVelocity,
+                  desc.radialVelocityStdDev, desc.radialVelocitySpan,
                   track.velocity.x, track.velocity.y, track.velocity.z);
     Serial.printf("     Sensor side info (raw): SNR mean=%.3f min=%.0f peak=%.0f | Noise mean=%.3f\n",
                   desc.meanSnr, desc.minSnr, desc.maxSnr,
@@ -2093,10 +2163,13 @@ void loop() {
     Serial.printf("     Best calibration candidate: %s | distance=%.4f | threshold=%.2f\n",
                   track.candidateName.length() ? track.candidateName.c_str() : "none",
                   track.candidateDistance, SHAPE_DESCRIPTOR_TOLERANCE);
-    Serial.printf("     Long-range gun evidence: pass=%s hits=%d/%d confirmed=%s | power=%s",
+    Serial.printf("     Long-range gun evidence: pass=%s hits=%d/%d shapeDoppler=%s shapeHits=%d/%d confirmed=%s | power=%s",
                   track.longRangeGunEvidenceThisFrame ? "yes" : "no",
                   track.longRangeGunWindowHits,
                   LONG_RANGE_GUN_REQUIRED_HITS,
+                  track.longRangeGunShapeDopplerEvidenceThisFrame ? "yes" : "no",
+                  track.longRangeGunShapeDopplerWindowHits,
+                  LONG_RANGE_GUN_REQUIRED_SHAPE_DOPPLER_HITS,
                   track.longRangeGunConfirmed ? "yes" : "no",
                   track.longRangePowerAvailable ? "available" : "missing");
     if (track.longRangePowerAvailable) {
@@ -2105,8 +2178,11 @@ void loop() {
                     track.longRangePowerRange,
                     (unsigned)track.longRangePowerRaw);
     }
-    Serial.printf(" | candidateLimit=%.2f\n",
-                  LONG_RANGE_GUN_MAX_CANDIDATE_DISTANCE);
+    Serial.printf(" | candidateLimit=%.2f shapePlanarityMin=%.2f shapeFlatnessMax=%.2f dopplerStdMin=%.3f\n",
+                  LONG_RANGE_GUN_MAX_CANDIDATE_DISTANCE,
+                  LONG_RANGE_GUN_MIN_PLANARITY,
+                  LONG_RANGE_GUN_MAX_FLATNESS,
+                  LONG_RANGE_GUN_MIN_DOPPLER_STD_DEV);
   }
 
   // readPacket() already waits for the next radar frame. Do not sleep here:
