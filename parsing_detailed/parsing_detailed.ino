@@ -168,14 +168,14 @@ public:
     pinMode(BUZZER_PIN, OUTPUT);
     digitalWrite(LED_PIN, LOW);
     digitalWrite(BUZZER_PIN, LOW);
-    Serial.printf("✓ Alert System initialized (LED: GPIO%d, Buzzer: GPIO%d)\n", LED_PIN, BUZZER_PIN);
+    Serial.printf("Alert system initialized (LED: GPIO%d, buzzer: GPIO%d)\n", LED_PIN, BUZZER_PIN);
   }
 
   void triggerAlert() {
     alertStartTime = millis();
     alertActive = true;
     digitalWrite(LED_PIN, HIGH);
-    Serial.println("⚠️  ALERT TRIGGERED - GUN DETECTED!");
+    Serial.println("ALERT: GUN DETECTED");
   }
 
   void refresh() {
@@ -322,7 +322,7 @@ public:
     if (pointDensity < MIN_POINT_DENSITY) {
       isValid = false;
       snprintf(invalidReason, sizeof(invalidReason), 
-               "Too sparse (%.1f < %.1f pts/m³)", pointDensity, MIN_POINT_DENSITY);
+               "Too sparse (%.1f < %.1f pts/m3)", pointDensity, MIN_POINT_DENSITY);
       return;
     }
 
@@ -350,14 +350,14 @@ public:
     if (volume < 0.0001) {
       isValid = false;
       snprintf(invalidReason, sizeof(invalidReason), 
-               "Too small (%.2f cm³)", volume * 1e6);
+               "Too small (%.2f cm3)", volume * 1e6);
       return;
     }
 
     if (volume > 1.0) {
       isValid = false;
       snprintf(invalidReason, sizeof(invalidReason), 
-               "Too large (%.2f m³)", volume);
+               "Too large (%.2f m3)", volume);
       return;
     }
 
@@ -1622,14 +1622,14 @@ void setup() {
     Serial.println("ERROR: SPIFFS mount failed!");
     while(1) delay(1000);
   }
-  Serial.println("✓ SPIFFS mounted");
+  Serial.println("SPIFFS mounted");
 
   pinMode(BUTTON_PIN, INPUT_PULLUP);
-  Serial.printf("✓ Button initialized on GPIO%d\n", BUTTON_PIN);
+  Serial.printf("Button initialized on GPIO%d\n", BUTTON_PIN);
 
   RadarSerial.setRxBufferSize(MAX_PACKET_LEN);
   RadarSerial.begin(RADAR_BAUD, SERIAL_8N1, RADAR_RX_PIN, RADAR_TX_PIN);
-  Serial.printf("✓ Radar UART: RX=GPIO%d @ %ld baud (TX unused)\n", RADAR_RX_PIN, RADAR_BAUD);
+  Serial.printf("Radar UART: RX=GPIO%d @ %ld baud (TX unused)\n", RADAR_RX_PIN, RADAR_BAUD);
 
   parser  = new RadarParser(&RadarSerial);
   calibDB = new CalibrationDatabase();
@@ -1638,17 +1638,17 @@ void setup() {
   
   alertManager->init();
 
-  Serial.printf("✓ Components initialized (Free heap: %d KB)\n", ESP.getFreeHeap() / 1024);
+  Serial.printf("Components initialized (free heap: %d KB)\n", ESP.getFreeHeap() / 1024);
 
-  if (calibDB->loadCalibration()) Serial.println("✓ Calibration loaded successfully");
-  else Serial.println("⚠ No calibration data found");
+  if (calibDB->loadCalibration()) Serial.println("Calibration loaded successfully");
+  else Serial.println("WARNING: Calibration data not found");
 
   Serial.println("\n=================================================");
-  Serial.println("🔧 ENHANCED FEATURES:");
-  Serial.printf("   • Ghost Point Rejection (min %d points)\n", MIN_POINTS_FOR_VALID_OBJECT);
-  Serial.println("   • Quality Validation (SNR, density, coherence)");
-  Serial.printf("   • Requires %d consecutive valid detections\n", MIN_CONSECUTIVE_DETECTIONS);
-  Serial.printf("   • Requires %d stable frames for confident ID\n", MIN_STABLE_FRAMES);
+  Serial.println("FEATURES:");
+  Serial.printf("  - Ghost point rejection (min %d points)\n", MIN_POINTS_FOR_VALID_OBJECT);
+  Serial.println("  - Quality validation (SNR, density, coherence)");
+  Serial.printf("  - Requires %d consecutive valid detections\n", MIN_CONSECUTIVE_DETECTIONS);
+  Serial.printf("  - Requires %d stable frames for confident ID\n", MIN_STABLE_FRAMES);
   Serial.println("=================================================");
   Serial.println("READY - Press button on GPIO4 to START/STOP");
   Serial.println("System is OFF. Press button to begin detection.");
@@ -1670,9 +1670,9 @@ void loop() {
       lastButtonPress = millis();
       
       if (systemRunning) {
-        Serial.println("\n🟢 SYSTEM STARTED - Detection active");
+        Serial.println("\nSYSTEM STARTED - Detection active");
       } else {
-        Serial.println("\n🔴 SYSTEM STOPPED - Detection paused");
+        Serial.println("\nSYSTEM STOPPED - Detection paused");
       }
     }
   }
@@ -1693,7 +1693,7 @@ void loop() {
   if (!gotFrame) {
     noFrameCount++;
     if (noFrameCount % 200 == 0) {
-      Serial.printf("⚫ Waiting for frames... (%d) | UART avail: %d bytes\n",
+      Serial.printf("Waiting for frames... (%d) | UART avail: %d bytes\n",
                     noFrameCount, RadarSerial.available());
     }
     delay(10);
@@ -1818,7 +1818,7 @@ void loop() {
   if (activeCount == 0) {
     noValidObjectFrames++;
     if (noValidObjectFrames % 20 == 0) {
-      Serial.printf("\n⚠️  No valid objects (filtering ghost points) - frame %d\n", noValidObjectFrames);
+      Serial.printf("\nNo valid objects (filtering ghost points) - frame %d\n", noValidObjectFrames);
     }
     delay(10);
     return;
@@ -1831,7 +1831,7 @@ void loop() {
   Serial.printf("Frame %d (radar %lu) | Valid Objects: %d",
                 frameCount, (unsigned long)parserInfo.frameNumber, activeCount);
   if (alertManager->isActive()) {
-    Serial.print(" | 🚨 ALERT ACTIVE");
+    Serial.print(" | ALERT ACTIVE");
   }
   Serial.println();
   Serial.printf("UART: packet=%lu B, objects=%lu, raw=%u, filtered=%u, TLVs=%lu [",
@@ -1867,48 +1867,48 @@ void loop() {
     char matType[32], matIcon[16];
     desc.getMaterialType(matType, matIcon);
 
-    const char* stateIcon;
+    const char* stateLabel;
     switch(track.state) {
-      case TrackedObject::DETECTING: stateIcon = "🔍"; break;
-      case TrackedObject::CONFIRMED: stateIcon = "✅"; break;
-      case TrackedObject::TEMP_LOST: stateIcon = "⏸️"; break;
-      case TrackedObject::LOST: stateIcon = "❌"; break;
-      case TrackedObject::GHOST: stateIcon = "👻"; break;
-      case TrackedObject::LOW_QUALITY: stateIcon = "⚠️"; break;
-      default: stateIcon = "❓";
+      case TrackedObject::DETECTING: stateLabel = "DETECTING"; break;
+      case TrackedObject::CONFIRMED: stateLabel = "CONFIRMED"; break;
+      case TrackedObject::TEMP_LOST: stateLabel = "TEMP_LOST"; break;
+      case TrackedObject::LOST: stateLabel = "LOST"; break;
+      case TrackedObject::GHOST: stateLabel = "GHOST"; break;
+      case TrackedObject::LOW_QUALITY: stateLabel = "LOW_QUALITY"; break;
+      default: stateLabel = "UNKNOWN";
     }
 
-    Serial.printf("\n  %s [%s][%s] Object ID: %d", stateIcon, objIcon, matIcon, track.id);
+    Serial.printf("\n  [%s][%s][%s] Object ID: %d", stateLabel, objIcon, matIcon, track.id);
     
     if ((track.matchedName.equalsIgnoreCase("gun") &&
          track.state == TrackedObject::CONFIRMED) ||
         track.longRangeGunConfirmed) {
-      Serial.print(" 🔴 GUN DETECTED!");
+      Serial.print(" | GUN DETECTED");
     }
     Serial.println();
 
     if (track.longRangeGunConfirmed) {
-      Serial.printf("     🚨 LONG-RANGE GUN SIGNATURE (%d/%d hits in last %d frames)\n",
+      Serial.printf("     LONG-RANGE GUN SIGNATURE (%d/%d hits in last %d frames)\n",
                     track.longRangeGunWindowHits,
                     LONG_RANGE_GUN_REQUIRED_HITS,
                     LONG_RANGE_GUN_HIT_WINDOW);
     } else if (track.matchedName.length() > 0) {
       if (track.state == TrackedObject::TEMP_LOST) {
-        Serial.printf("     ⏸️  IDENTIFIED (HELD): '%s' [%d/%d frames]\n", 
+        Serial.printf("     IDENTIFIED (HELD): '%s' [%d/%d frames]\n",
                      track.matchedName.c_str(), 
                      track.framesSinceLastMatch, 
                      PRESENCE_HOLD_FRAMES);
       } else {
-        Serial.printf("     ✅ IDENTIFIED: '%s'\n", track.matchedName.c_str());
+        Serial.printf("     IDENTIFIED: '%s'\n", track.matchedName.c_str());
         const char* confLevel = desc.getMatchConfidenceLevel(track.lastMatchDistance);
         int confPct = desc.getMatchConfidencePct(track.lastMatchDistance);
         Serial.printf("     Match Confidence: %s (%d%%)\n", confLevel, confPct);
       }
     } else if (track.state == TrackedObject::DETECTING) {
       int needMore = max(0, MIN_CONSECUTIVE_DETECTIONS - track.consecutiveValidDetections);
-      Serial.printf("     🔍 DETECTING... (need %d more valid frames)\n", needMore);
+      Serial.printf("     DETECTING... (need %d more valid frames)\n", needMore);
     } else {
-      Serial.println("     ❓ UNKNOWN OBJECT");
+      Serial.println("     UNKNOWN OBJECT");
     }
 
     Serial.printf("     Position estimate: X=%+.4fm Y=%+.4fm Z=%+.4fm | Range=%.4fm\n",
