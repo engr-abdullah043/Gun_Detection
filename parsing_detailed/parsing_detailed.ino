@@ -1,15 +1,5 @@
-/*
- * mmWave Radar Detection System for ESP32-S3
- * Advanced Geometric + RCS Recognition
- * WITH GUN DETECTION ALERT (LED + BUZZER)
- * WITH BUTTON START/STOP CONTROL
- * ENHANCED WITH GHOST REJECTION & QUALITY VALIDATION
- *
- * Hardware:
- * - LED -> GPIO 11 (through 220Ω resistor to GND)
- * - Buzzer -> GPIO 12 (active buzzer to GND)
- * - Button -> GPIO 4 (other side to GND)
- */
+// ESP32-S3 mmWave gun-detection firmware.
+// Load /radar_calibration.json into SPIFFS; GPIO: radar RX 16, button 4, LED 2, buzzer 38.
 
 #include <Arduino.h>
 #include <HardwareSerial.h>
@@ -21,98 +11,75 @@
 #include <algorithm>
 #include <cstring>
 
-// =========================================================
-// BUTTON CONTROL
-// =========================================================
+// Button control
 const int BUTTON_PIN = 4;
 bool systemRunning = false;
 unsigned long lastButtonPress = 0;
 
-// =========================================================
-// GPIO Configuration for Alert System
-// =========================================================
-const int LED_PIN = 11;
-const int BUZZER_PIN = 12;
+// Alert hardware
+const int LED_PIN = 2;
+const int BUZZER_PIN = 38;
 
 const int ALERT_DURATION = 3000;
 const int BEEP_PATTERN_FAST = 200;
 
-// =========================================================
-// Configuration Constants
-// =========================================================
+// Firmware configuration
 const uint8_t MAGIC_WORD[] = {0x02,0x01,0x04,0x03,0x06,0x05,0x08,0x07};
 
 const int RADAR_RX_PIN = 16;
 const int RADAR_TX_PIN = -1;
 
-// Detailed telemetry can exceed the practical throughput of 115200 baud.
 const long SERIAL_MONITOR_BAUD = 460800;
 const long RADAR_BAUD = 921600;
 
 static const uint32_t HEADER_LEN = 40;
 static const uint32_t MAX_PACKET_LEN = 32 * 1024;
 
-// Active balanced profile: 128-point range FFT and 32 Doppler bins.
-// Range-bin spacing = c * Fs / (2 * slope * rangeFFTSize)
-// using Fs=2.279 MHz and slope=70 MHz/us.
 const size_t RANGE_PROFILE_MAX_BINS = 128;
 const float RANGE_BIN_SIZE_METERS = 0.0381529018f;
 
-// Match mmWave Demo Visualizer 3.6.0 for this profile exactly:
-//   dB = raw * (16 / 12) / 256 * (20 * log10(2))
-//        + 20 * log10(32 / 128) + 20 * log10(16 / 32)
-// 12 is the number of virtual antennas; 16 is its next power of two.
-// The final two terms compensate the 128-bin range FFT and 32-bin Doppler FFT.
-// This is relative power, not calibrated dBm.
 const float RANGE_PROFILE_RAW_TO_DB = 0.031357291215f;
 const float RANGE_PROFILE_FFT_COMPENSATION_DB = -18.061799740f;
 
-// Range-adaptive clustering parameters. At longer range, the same angular
-// separation produces a larger Cartesian point spacing.
 const float DBSCAN_EPS_NEAR = 0.15;
 const float DBSCAN_EPS_MID = 0.20;
 const float DBSCAN_EPS_FAR = 0.25;
 const float DBSCAN_NEAR_RANGE_MAX = 1.50;
 const float DBSCAN_MID_RANGE_MAX = 2.50;
-// DBSCAN minPoints is the total neighborhood size including the seed point.
 const int DBSCAN_MIN_POINTS = 5;
 
 // Range filtering
 const float RANGE_MIN = 0.20;
-// The radar deployment boundary is 3.50 m. Keep 10 cm of processing margin
-// for quantization and point-to-point range jitter at the edge.
 const float RANGE_MAX = 3.60;
 
-// SNR threshold
+// Signal filtering
 const int MIN_SNR = 20;
 
-// TLV 7 overwrites this value. Frames without side information must not
-// silently pass SNR filtering with fabricated measurements.
 const uint16_t SNR_UNKNOWN = 0;
 
-// Minimum cluster size
+// Cluster thresholds
 const int MIN_CLUSTER_POINTS = 5;
 const int MIN_POINTS_FOR_OUTPUT = 5;
 
-// ===== NEW: GHOST REJECTION SETTINGS =====
+// Object validation
 const int MIN_POINTS_FOR_VALID_OBJECT = 5;
 const int MIN_POINTS_FOR_CONFIRMED_MATCH = 15;
 
-// Spatial coherence requirements
-const float MAX_CLUSTER_SPREAD = 0.6;        // Max 60cm spread
-const float MIN_POINT_DENSITY = 25.0;        // Points per m³
+// Spatial validation
+const float MAX_CLUSTER_SPREAD = 0.6;
+const float MIN_POINT_DENSITY = 25.0;
 
 // Quality thresholds
 const float MIN_AVERAGE_SNR = 22.0;
 const float MIN_PEAK_SNR = 30.0;
 const float MAX_SNR_VARIANCE_RATIO = 0.9;
 
-// Match quality thresholds
+// Match thresholds
 const float STRICT_MATCH_THRESHOLD = 0.20;
 const float CONFIDENT_MATCH_THRESHOLD = 0.25;
 const float WEAK_MATCH_THRESHOLD = 0.35;
 
-// Temporal consistency requirements
+// Temporal validation
 const int MIN_CONSECUTIVE_DETECTIONS = 6;
 const int MIN_STABLE_FRAMES = 10;
 
@@ -137,22 +104,12 @@ const int MIN_DESCRIPTORS_FOR_ROBUST = 5;
 const int PRESENCE_HOLD_FRAMES = 10;
 const int MIN_HITS_FOR_CONFIRMED = 8;
 
-// Scenario-specific gun signature. These gates are derived from five labeled
-// captures: open at 3.0 m, under cloth at 3.0 m, hand bag at 2.5 m, concealed
-// bag at 2.5 m, and carried by a person at 2.6 m. The static boundary clutter
-// at 3.486-3.49 m (5-6 points, SNR peak <= 118, z ~ -0.6 m) must stay below
-// every SNR/width/range/z gate.
 const float LONG_RANGE_GUN_MIN_RANGE = 2.30;
 const float LONG_RANGE_GUN_MAX_RANGE = 3.45;
 const float LONG_RANGE_GUN_MIN_POWER_DB = 65.0;
 const float LONG_RANGE_GUN_MAX_CANDIDATE_DISTANCE = 0.55;
 const float LONG_RANGE_GUN_MIN_LENGTH = 0.15;
 const float LONG_RANGE_GUN_MAX_LENGTH = 0.80;
-// Cross-range width is quantized by the azimuth resolution: near 3.1 m the
-// same gun reads 9.5-9.8 cm in one session and 12.6-13.4 cm in another
-// depending on placement. 0.10 sat inside that spread and dropped 28 of 31
-// frames of a labeled gun-present capture. Static boundary clutter stays
-// mostly below 8 cm and is rejected by range/SNR/z regardless.
 const float LONG_RANGE_GUN_MIN_WIDTH = 0.08;
 const float LONG_RANGE_GUN_MAX_WIDTH = 0.55;
 const float LONG_RANGE_GUN_MIN_MEAN_SNR = 118.0;
@@ -161,16 +118,10 @@ const float LONG_RANGE_GUN_MAX_ABS_VELOCITY = 0.35;
 const float LONG_RANGE_GUN_MAX_ABS_Z = 0.50;
 const float LONG_RANGE_GUN_MIN_QUALITY = 80.0;
 const int LONG_RANGE_GUN_MIN_POINTS = 5;
-// Confirmation requires REQUIRED_HITS passing frames within the last
-// HIT_WINDOW evaluated frames. A strict consecutive counter reset to zero on
-// every dropped radar packet, which made the alert flap while the gun was
-// still present.
 const int LONG_RANGE_GUN_REQUIRED_HITS = 5;
 const int LONG_RANGE_GUN_HIT_WINDOW = 7;
 
-// =========================================================
-// Data Structures
-// =========================================================
+// Data structures
 struct Point3D {
   float x, y, z;
   Point3D() : x(0), y(0), z(0) {}
@@ -201,9 +152,7 @@ struct ClusterData {
   int numPoints;
 };
 
-// =========================================================
-// Alert Manager Class
-// =========================================================
+// Alert manager
 class AlertManager {
 private:
   unsigned long alertStartTime;
@@ -229,9 +178,6 @@ public:
     Serial.println("⚠️  ALERT TRIGGERED - GUN DETECTED!");
   }
 
-  // Called every frame the gun is still confirmed. Pushes the expiry window
-  // forward so the alert stays continuously active while the gun is present
-  // and only times out ALERT_DURATION after the last confirmed frame.
   void refresh() {
     if (alertActive) alertStartTime = millis();
   }
@@ -261,9 +207,7 @@ public:
   bool isActive() const { return alertActive; }
 };
 
-// =========================================================
-// Advanced Shape Descriptor with Quality Validation
-// =========================================================
+// Shape descriptor
 class AdvancedShapeDescriptor {
 public:
   float length, width, height;
@@ -295,7 +239,6 @@ public:
   float meanNoise;
   float meanSnrMargin;
 
-  // NEW: Quality metrics
   float spatialSpread;
   float confidenceScore;
   bool isValid;
@@ -328,8 +271,6 @@ public:
     distance = dist;
     numPoints = (int)pts.size();
 
-    // Accumulate statistics in double precision. Individual side-information
-    // samples remain the exact uint16_t values reported by the sensor.
     double sumSnr = 0.0, sumSnr2 = 0.0;
     maxSnr = 0;
     minSnr = 10000;
@@ -356,18 +297,14 @@ public:
     pointCloudThickness = calculateThickness(pts);
     planarityScore = calculatePlanarity(pts);
 
-    // NEW: Calculate quality metrics
     spatialSpread = calculateSpatialSpread(pts);
     
-    // Validate object
     validateObject();
     
-    // Calculate confidence score
     confidenceScore = calculateConfidenceScore();
   }
 
   void validateObject() {
-    // Check 1: Sufficient points
     if (numPoints < MIN_POINTS_FOR_VALID_OBJECT) {
       isValid = false;
       snprintf(invalidReason, sizeof(invalidReason), 
@@ -375,7 +312,6 @@ public:
       return;
     }
 
-    // Check 2: Spatial coherence
     if (spatialSpread > MAX_CLUSTER_SPREAD) {
       isValid = false;
       snprintf(invalidReason, sizeof(invalidReason), 
@@ -383,7 +319,6 @@ public:
       return;
     }
 
-    // Check 3: Point density
     if (pointDensity < MIN_POINT_DENSITY) {
       isValid = false;
       snprintf(invalidReason, sizeof(invalidReason), 
@@ -391,7 +326,6 @@ public:
       return;
     }
 
-    // Check 4: SNR quality
     if (meanSnr < MIN_AVERAGE_SNR) {
       isValid = false;
       snprintf(invalidReason, sizeof(invalidReason), 
@@ -406,7 +340,6 @@ public:
       return;
     }
 
-    // Check 5: SNR consistency
     if (snrVarianceRatio > MAX_SNR_VARIANCE_RATIO) {
       isValid = false;
       snprintf(invalidReason, sizeof(invalidReason), 
@@ -414,7 +347,6 @@ public:
       return;
     }
 
-    // Check 6: Reasonable size
     if (volume < 0.0001) {
       isValid = false;
       snprintf(invalidReason, sizeof(invalidReason), 
@@ -438,16 +370,12 @@ public:
 
     float scores[4];
     
-    // Point count confidence
     scores[0] = min(100.0f, (numPoints / (float)MIN_POINTS_FOR_VALID_OBJECT) * 50.0f);
     
-    // Spatial coherence confidence
     scores[1] = max(0.0f, 100.0f * (1.0f - spatialSpread / MAX_CLUSTER_SPREAD));
     
-    // SNR confidence
     scores[2] = min(100.0f, (meanSnr / MIN_AVERAGE_SNR) * 50.0f);
     
-    // Density confidence
     scores[3] = min(100.0f, (pointDensity / MIN_POINT_DENSITY) * 50.0f);
     
     float sum = 0;
@@ -667,9 +595,7 @@ private:
   }
 };
 
-// =========================================================
-// Calibration Database
-// =========================================================
+// Calibration database
 class CalibrationDatabase {
 private:
   DynamicJsonDocument doc;
@@ -743,9 +669,7 @@ public:
   }
 };
 
-// =========================================================
-// Enhanced Object Tracker with Ghost Rejection
-// =========================================================
+// Object tracking
 struct TrackedObject {
   int id;
   Point3D position;
@@ -753,19 +677,14 @@ struct TrackedObject {
   int age;
   int hits;
   
-  // Descriptor history for robust matching
   std::deque<AdvancedShapeDescriptor> allDescriptors;
   
-  // Match hysteresis state
   String matchedName;
   String candidateName;
   float candidateDistance;
   float lastMatchDistance;
   int framesSinceLastMatch;
 
-  // Scenario-specific long-range evidence is kept per track so isolated
-  // frames cannot activate the alert. Hits are counted over a sliding window
-  // (bit i of the history is the pass/fail of the i-th most recent frame).
   uint8_t longRangeGunHitHistory;
   int longRangeGunWindowHits;
   bool longRangeGunEvidenceThisFrame;
@@ -775,7 +694,6 @@ struct TrackedObject {
   float longRangePowerRange;
   uint16_t longRangePowerRaw;
   
-  // Track state
   enum State {
     DETECTING,
     CONFIRMED,
@@ -786,7 +704,6 @@ struct TrackedObject {
   };
   State state;
   
-  // NEW: Quality tracking
   int consecutiveValidDetections;
   int consecutiveHighQuality;
   std::deque<float> qualityHistory;
@@ -809,8 +726,6 @@ public:
   void update(const std::vector<ClusterData>& clusters,
               const std::vector<AdvancedShapeDescriptor>& descriptors) {
 
-    // Age tracks without moving their reported position. Predicted positions in
-    // the previous firmware were printed as real measurements and caused drift.
     for (auto& track : tracks) {
       if (track.active) {
         track.measuredThisFrame = false;
@@ -821,7 +736,6 @@ public:
 
     std::vector<bool> clusterUsed(clusters.size(), false);
 
-    // Associate clusters with existing tracks
     for (auto& track : tracks) {
       if (!track.active) continue;
 
@@ -842,7 +756,6 @@ public:
         track.position = clusters[bestIdx].centroid;
         track.velocity = (track.position - oldPos) * 10.0f;
         
-        // Update descriptor and quality
         updateDescriptor(track, descriptors[bestIdx]);
         
         track.hits++;
@@ -852,9 +765,6 @@ public:
       }
     }
 
-    // Destroy retired tracks before creating replacements. The previous code
-    // only marked them inactive, so their descriptor deques accumulated until
-    // a vector reallocation failed and std::terminate() aborted the ESP32.
     tracks.erase(
       std::remove_if(tracks.begin(), tracks.end(),
         [](const TrackedObject& track) {
@@ -862,7 +772,6 @@ public:
         }),
       tracks.end());
 
-    // Create new tracks for unmatched clusters
     size_t droppedNewTracks = 0;
     for (size_t i = 0; i < clusters.size(); i++) {
       if (!clusterUsed[i]) {
@@ -871,8 +780,6 @@ public:
           continue;
         }
 
-        // Capacity is reserved up front and bounded above, so this cannot
-        // trigger the vector-wide deep copy seen in the decoded backtrace.
         tracks.emplace_back();
         TrackedObject& t = tracks.back();
         t.id = nextId++;
@@ -920,7 +827,6 @@ public:
       track.allDescriptors.pop_front();
     }
     
-    // Track quality
     track.qualityHistory.push_back(descriptor.confidenceScore);
     if (track.qualityHistory.size() > 30) {
       track.qualityHistory.pop_front();
@@ -940,7 +846,6 @@ public:
   }
 
   void updateMatchWithHysteresis(TrackedObject& track, CalibrationDatabase* calibDB) {
-    // Check if we have enough valid detections
     if (track.consecutiveValidDetections < MIN_CONSECUTIVE_DETECTIONS) {
       track.matchedName = "";
       if (track.isGhost) {
@@ -951,7 +856,6 @@ public:
       return;
     }
     
-    // Check average quality
     if (track.qualityHistory.size() > 0) {
       float avgQuality = 0;
       for (float q : track.qualityHistory) avgQuality += q;
@@ -965,14 +869,10 @@ public:
       }
     }
     
-    // Get robust descriptor (median of recent)
     if (track.allDescriptors.empty()) return;
     
     AdvancedShapeDescriptor robustDesc;
     if (track.allDescriptors.size() >= MIN_DESCRIPTORS_FOR_ROBUST) {
-      // Average the recent descriptor window. The previous implementation
-      // selected the middle element chronologically; it did not calculate a
-      // median and made matching depend on an arbitrary old frame.
       robustDesc = track.allDescriptors.back();
       const size_t count = track.allDescriptors.size();
       robustDesc.length = robustDesc.width = robustDesc.height = 0;
@@ -1025,7 +925,6 @@ public:
       robustDesc = track.allDescriptors.back();
     }
     
-    // Find match
     String matchName;
     float confidence = 0.0f;
     bool matched = calibDB->findMatch(robustDesc, matchName, confidence);
@@ -1039,18 +938,14 @@ public:
     
     float distance = 1.0f - (confidence / 100.0f);
     
-    // Hysteresis logic
     if (track.matchedName.length() == 0) {
-      // No current match - use ENTER threshold
       if (distance < MATCH_ENTER_THRESHOLD && track.consecutiveHighQuality >= MIN_STABLE_FRAMES) {
         track.matchedName = matchName;
         track.lastMatchDistance = distance;
         track.framesSinceLastMatch = 0;
       }
     } else {
-      // Have a match
       if (matchName == track.matchedName) {
-        // Same object - use EXIT threshold
         if (distance < MATCH_EXIT_THRESHOLD) {
           track.lastMatchDistance = distance;
           track.framesSinceLastMatch = 0;
@@ -1058,7 +953,6 @@ public:
           track.matchedName = "";
         }
       } else {
-        // Different object detected
         if (distance < MATCH_ENTER_THRESHOLD && distance < track.lastMatchDistance - 0.05f) {
           track.matchedName = matchName;
           track.lastMatchDistance = distance;
@@ -1067,14 +961,12 @@ public:
       }
     }
     
-    // Presence hold
     if (track.matchedName.length() > 0) {
       if (track.framesSinceLastMatch >= PRESENCE_HOLD_FRAMES) {
         track.matchedName = "";
       }
     }
     
-    // Update state
     if (track.matchedName.length() > 0) {
       if (track.framesSinceLastMatch == 0) {
         if (track.state != TrackedObject::CONFIRMED && 
@@ -1102,9 +994,7 @@ public:
   std::vector<TrackedObject>& getTracks() { return tracks; }
 };
 
-// =========================================================
-// Radar Parser
-// =========================================================
+// Radar parser
 struct ParserDiagnostics {
   uint32_t frameNumber;
   uint32_t uartObjectCount;
@@ -1244,10 +1134,6 @@ public:
         diagnostics.tlvTypes[diagnostics.tlvTypeCount++] = tlvType;
       }
 
-      // Some xWR68xx demo builds disagree on whether tlvLen includes the
-      // 8-byte TLV header. Resolve each boundary by checking which candidate
-      // lands on a plausible next TLV header. This also tolerates TLV 1 not
-      // being first and mixed conventions in vendor demo output.
       size_t includeEnd = (tlvLen >= 8U && tlvLen <= totalLen - tlvStart)
         ? tlvStart + tlvLen : totalLen + 1U;
       size_t payloadEnd = (tlvLen <= totalLen - tlvData)
@@ -1277,14 +1163,8 @@ public:
       } else if (tlvType == 2U && preferredLengthConventionKnown &&
                  ((preferredLengthIncludesHeader && includeInBounds) ||
                   (!preferredLengthIncludesHeader && payloadInBounds))) {
-        // Range-profile TLV may be followed by vendor-specific data whose
-        // header is not in the standard type range. Reuse the convention
-        // already proven by TLVs 1 and 7 so TLV 2 remains available.
         lengthIncludesHeader = preferredLengthIncludesHeader;
       } else {
-        // A vendor-specific or trailing visualization TLV may use a layout we
-        // do not understand. The detection frame is still complete when both
-        // required data TLVs have already been parsed successfully.
         if (!diagnostics.pointsTlvSeen || !diagnostics.sideInfoTlvSeen) {
           diagnostics.malformed = true;
         }
@@ -1327,8 +1207,6 @@ public:
         }
       }
       else if (tlvType == 2 && payloadLen >= 2U) {
-        // Zero-Doppler range profile: one uint16 log-magnitude value per
-        // range bin. Retain the raw values and convert only when displaying.
         size_t availableBins = payloadLen / 2U;
         diagnostics.rangeProfileBinCount =
           availableBins < RANGE_PROFILE_MAX_BINS
@@ -1347,8 +1225,6 @@ public:
   }
 };
 
-// Explicit prototypes keep the Arduino sketch preprocessor from placing a
-// prototype before the custom tracker and parser types are declared.
 void pushLongRangeGunObservation(TrackedObject& track, bool pass);
 void evaluateLongRangeGunSignature(TrackedObject& track,
                                    const ParserDiagnostics& diagnostics);
@@ -1408,10 +1284,6 @@ void evaluateLongRangeGunSignature(TrackedObject& track,
     return;
   }
 
-  // A frame where the track was not re-measured (dropped radar packet or a
-  // missed cluster association) is one miss in the sliding window; it must
-  // not erase the accumulated evidence the way the old consecutive counter
-  // did, or the alert flaps while the gun is still present.
   if (!track.measuredThisFrame) {
     pushLongRangeGunObservation(track, false);
     return;
@@ -1447,9 +1319,7 @@ void evaluateLongRangeGunSignature(TrackedObject& track,
   pushLongRangeGunObservation(track, passes);
 }
 
-// =========================================================
-// Point Processing
-// =========================================================
+// Point processing
 struct FilterDiagnostics {
   size_t inputCount;
   size_t acceptedCount;
@@ -1484,8 +1354,6 @@ float adaptiveDbscanEps(float rangeMeters) {
   return DBSCAN_EPS_FAR;
 }
 
-// Explicit prototype prevents the Arduino sketch preprocessor from emitting
-// this declaration before the custom return type above is defined.
 FilterDiagnostics filterPoints(std::vector<RadarPoint>& points);
 void clusterDBSCAN(const std::vector<RadarPoint>& points,
                    std::vector<ClusterData>& clusters,
@@ -1525,8 +1393,6 @@ void clusterDBSCAN(const std::vector<RadarPoint>& points,
                    std::vector<ClusterData>& clusters,
                    DbscanDiagnostics& diagnostics) {
 
-  // Calculate diagnostics for every point, including frames too sparse to
-  // create a cluster. Neighborhood counts are total points including seed.
   for (size_t i = 0; i < points.size(); i++) {
     Point3D pi(points[i].x, points[i].y, points[i].z);
     float eps = adaptiveDbscanEps(pi.norm());
@@ -1565,7 +1431,6 @@ void clusterDBSCAN(const std::vector<RadarPoint>& points,
       if (pi.distanceTo(pj) < eps) neighbors.push_back(j);
     }
 
-    // DBSCAN_MIN_POINTS is total points including seed.
     if ((int)neighbors.size() < DBSCAN_MIN_POINTS) {
       labels[i] = NOISE;
       continue;
@@ -1579,14 +1444,11 @@ void clusterDBSCAN(const std::vector<RadarPoint>& points,
     for (size_t k = 0; k < neighbors.size(); k++) {
       size_t nIdx = neighbors[k];
 
-      // A point previously classified as noise may be a border point of this
-      // cluster, but border points do not expand the search.
       if (labels[nIdx] == NOISE) {
         labels[nIdx] = clusterID;
         continue;
       }
 
-      // Already processed or assigned to a cluster.
       if (labels[nIdx] != UNVISITED) continue;
 
       labels[nIdx] = clusterID;
@@ -1712,18 +1574,13 @@ bool extractDimensions(const ClusterData& cluster, AdvancedShapeDescriptor& desc
   return true;
 }
 
-// =========================================================
-// Main System
-// =========================================================
+// Main system
 HardwareSerial RadarSerial(1);
 RadarParser* parser = nullptr;
 CalibrationDatabase* calibDB = nullptr;
 ObjectTracker* tracker = nullptr;
 AlertManager* alertManager = nullptr;
 
-// A radar frame with no usable points/clusters counts as a single miss in
-// each track's sliding window. Confirmation survives brief dropouts and
-// naturally decays if the scene stays empty.
 void recordLongRangeGunMissAllTracks() {
   if (tracker == nullptr) return;
   for (auto& track : tracker->getTracks()) {
@@ -1770,9 +1627,6 @@ void setup() {
   pinMode(BUTTON_PIN, INPUT_PULLUP);
   Serial.printf("✓ Button initialized on GPIO%d\n", BUTTON_PIN);
 
-  // Radar packets arrive as short 921600-baud bursts. The Arduino default RX
-  // ring is smaller than a typical point-cloud packet, so allocate enough
-  // space for one maximum-size packet before enabling the UART.
   RadarSerial.setRxBufferSize(MAX_PACKET_LEN);
   RadarSerial.begin(RADAR_BAUD, SERIAL_8N1, RADAR_RX_PIN, RADAR_TX_PIN);
   Serial.printf("✓ Radar UART: RX=GPIO%d @ %ld baud (TX unused)\n", RADAR_RX_PIN, RADAR_BAUD);
@@ -1808,7 +1662,6 @@ void loop() {
   static bool lastButtonState = HIGH;
   static int noValidObjectFrames = 0;
 
-  // Check button press with debouncing
   bool currentButtonState = digitalRead(BUTTON_PIN);
   
   if (currentButtonState == LOW && lastButtonState == HIGH) {
@@ -1928,7 +1781,6 @@ void loop() {
   tracker->update(validClusters, descriptors);
   auto& tracks = tracker->getTracks();
 
-  // Update matches with hysteresis
   for (auto& tr : tracks) {
     if (tr.active) {
       tracker->updateMatchWithHysteresis(tr, calibDB);
@@ -1936,7 +1788,6 @@ void loop() {
     }
   }
 
-  // Count valid (non-ghost) active tracks
   int activeCount = 0;
   bool gunDetected = false;
   
@@ -2002,7 +1853,6 @@ void loop() {
   for (const auto& track : tracks) {
     if (!track.active || !track.measuredThisFrame) continue;
     
-    // Skip ghost and low quality tracks
     if (track.isGhost || track.state == TrackedObject::GHOST || 
         track.state == TrackedObject::LOW_QUALITY) {
       continue;
@@ -2017,7 +1867,6 @@ void loop() {
     char matType[32], matIcon[16];
     desc.getMaterialType(matType, matIcon);
 
-    // State icons
     const char* stateIcon;
     switch(track.state) {
       case TrackedObject::DETECTING: stateIcon = "🔍"; break;
@@ -2109,7 +1958,5 @@ void loop() {
                   LONG_RANGE_GUN_MAX_CANDIDATE_DISTANCE);
   }
 
-  // readPacket() already waits for the next radar frame. Do not sleep here:
-  // verbose Serial output plus an extra delay can overrun burst UART input.
   delay(1);
 }
